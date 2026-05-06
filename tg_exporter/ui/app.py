@@ -154,6 +154,29 @@ class App(ctk.CTk):
         self.geometry(WINDOW["size"])
         self.minsize(*WINDOW["min_size"])
         self.configure(fg_color=C["bg"])
+        # Win11 + Tk + Python 3.14 теряет окно при разворачивании из таскбара,
+        # если последняя сохранённая Tk-геометрия попала в координаты вне
+        # подключённых мониторов (отключённый второй экран, undock ноута).
+        # MainThread штатно ждёт WM_*, окно «не отвечает» — спасает только
+        # принудительный SetWindowPos. Здесь страхуемся через <Map>.
+        self.update_idletasks()
+        self._ensure_visible()
+        self.bind("<Map>", lambda _e: self._ensure_visible())
+
+    def _ensure_visible(self) -> None:
+        """Если окно вне видимой области primary-монитора — центрируем его."""
+        try:
+            self.update_idletasks()
+            x, y = self.winfo_x(), self.winfo_y()
+            w, h = self.winfo_width(), self.winfo_height()
+            sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
+            # Полностью вне primary screen — переносим в центр.
+            if x + w <= 0 or y + h <= 0 or x >= sw or y >= sh:
+                new_x = max(0, (sw - w) // 2)
+                new_y = max(0, (sh - h) // 2)
+                self.geometry(f"{w}x{h}+{new_x}+{new_y}")
+        except Exception:
+            pass  # _ensure_visible не должен ронять UI
 
     # ---- Navigation ----
 
