@@ -199,7 +199,8 @@ class AnchoredPopupController:
       - измерить и поставить вниз под якорь либо вверх над ним, если снизу
         не помещается (resolve_popup_position);
       - закрыть по <Escape>, клику вне popup'а, <Destroy> якоря, прокрутке
-        контента (<MouseWheel>) и уходе приложения на задний план (<Deactivate>);
+        контента (<MouseWheel>) и уходе приложения на задний план (<FocusOut>
+        popup'а с проверкой focus_get; <Deactivate> хоста как backup);
       - опционально следить за окном-хостом и двигать popup при его
         перемещении/ресайзе (<Configure>).
 
@@ -287,6 +288,10 @@ class AnchoredPopupController:
             pass
 
         popup.bind("<Escape>", lambda _e: self.close())
+        # На Windows для overrideredirect+transient <Deactivate> хоста при
+        # alt-tab НЕ приходит, зато popup (он в фокусе) получает <FocusOut>.
+        # Закрываемся, только если фокус ушёл из приложения / на чужой виджет.
+        popup.bind("<FocusOut>", self._on_popup_focus_out, add="+")
         popup.after(50, popup.focus_set)
         self._popup = popup
 
@@ -389,12 +394,41 @@ class AnchoredPopupController:
 
     def _on_deactivate(self, event=None) -> None:
         # Приложение потеряло передний план (alt-tab): topmost-popup иначе
-        # остаётся висеть поверх другого окна.
+        # остаётся висеть поверх другого окна. На Windows для нашего popup'а
+        # это событие обычно не приходит (основной путь — _on_popup_focus_out),
+        # но оставляем как backup для других платформ.
         if event is not None and self._host is not None:
             if str(event.widget) != str(self._host):
                 return
         if self.is_open():
             self.close()
+
+    def _on_popup_focus_out(self, _event=None) -> None:
+        # Откладываем проверку: к моменту обработки фокус ещё «переезжает» на
+        # новый виджет/окно.
+        popup = self._popup
+        if popup is not None:
+            try:
+                popup.after_idle(self._close_if_focus_left)
+            except tk.TclError:
+                pass
+
+    def _close_if_focus_left(self) -> None:
+        if not self.is_open():
+            return
+        try:
+            focused = self._popup.focus_get()
+        except (KeyError, tk.TclError):
+            return
+        # focus_get() == None -> фокус ушёл из приложения (alt-tab) -> закрыть.
+        if focused is None:
+            self.close()
+            return
+        # Фокус внутри popup'а (клик по дню/стрелке) или на якоре (его command
+        # сам сделает toggle) — не закрываем.
+        if is_descendant(focused, self._popup) or is_descendant(focused, self._anchor):
+            return
+        self.close()
 
 
 def setup_smooth_scroll(modal, scrollable_frame) -> None:

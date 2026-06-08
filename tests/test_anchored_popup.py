@@ -75,6 +75,7 @@ class _FakeWidget:
         self.height, self.width = 300, 240
         self.reqheight, self.reqwidth = 300, 240
         self.screenwidth, self.screenheight = 1920, 1080
+        self.focus_target = None        # что вернёт focus_get()
 
     def bind(self, seq, fn, add=None):
         self._bind_n += 1
@@ -137,6 +138,12 @@ class _FakeWidget:
     def after(self, ms, fn=None):
         # НЕ вызываем fn: focus_set нам в тесте не нужен.
         self.after_calls.append((ms, fn))
+
+    def after_idle(self, fn, *a):
+        return fn(*a)                   # синхронно для тестов
+
+    def focus_get(self):
+        return self.focus_target
 
     def destroy(self):
         self.destroyed = True
@@ -270,6 +277,41 @@ class TestAnchoredPopupController(unittest.TestCase):
         ctl, anchor, host, popup = self._make()
         _handler(host, "<Deactivate>")(_Event(_FakeWidget("child")))
         self.assertTrue(ctl.is_open())
+
+    # ---- focus-out (alt-tab / потеря фокуса приложением) ----
+    # На Windows для overrideredirect+transient <Deactivate> не приходит, зато
+    # popup (он в фокусе) получает <FocusOut>. Закрываемся, только если фокус
+    # ушёл из приложения или на чужой виджет — не на день/стрелку/якорь.
+
+    def test_focusout_bound_on_popup(self):
+        ctl, anchor, host, popup = self._make()
+        seqs = {s for s, _fn, _add in popup.binds}
+        self.assertIn("<FocusOut>", seqs)
+
+    def test_focus_left_app_closes(self):
+        ctl, anchor, host, popup = self._make()
+        popup.focus_target = None                 # фокус ушёл из приложения (alt-tab)
+        ctl._close_if_focus_left()
+        self.assertFalse(ctl.is_open())
+        self.assertTrue(popup.destroyed)
+
+    def test_focus_inside_popup_keeps_open(self):
+        ctl, anchor, host, popup = self._make()
+        popup.focus_target = _FakeWidget("daybtn", master=popup)
+        ctl._close_if_focus_left()
+        self.assertTrue(ctl.is_open())            # клик по дню/стрелке не закрывает
+
+    def test_focus_on_anchor_keeps_open(self):
+        ctl, anchor, host, popup = self._make()
+        popup.focus_target = anchor               # клик по якорю — command сам сделает toggle
+        ctl._close_if_focus_left()
+        self.assertTrue(ctl.is_open())
+
+    def test_focus_to_other_widget_closes(self):
+        ctl, anchor, host, popup = self._make()
+        popup.focus_target = _FakeWidget("modalwidget", master=host)
+        ctl._close_if_focus_left()
+        self.assertFalse(ctl.is_open())
 
     # ---- close ----
 
