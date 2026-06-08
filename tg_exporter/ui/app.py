@@ -292,6 +292,12 @@ class App(ctk.CTk):
         modal = ExportModal(self, dialog)
         self._active_export_modal = modal
 
+    def detach_export_modal(self, modal) -> None:
+        """Отвязывает модалку при её закрытии — чтобы хвостовые события
+        экспорта не дёргали уничтоженный виджет."""
+        if self._active_export_modal is modal:
+            self._active_export_modal = None
+
     def load_forum_topics(self, dialog, modal) -> None:
         """Грузит список топиков форума в фоне для модалки экспорта."""
         self._worker.submit(self._bg_load_topics, dialog, modal)
@@ -494,6 +500,11 @@ class App(ctk.CTk):
                 self._worker.put_event("topic_done", (self._topic_base, q.ok, q.failed))
             self._topic_active = False
             self._topic_queue = None
+            # _topic_base уже захвачен в payload выше; опции больше не нужны.
+            # _active_export_modal НЕ трогаем — он нужен обработчику topic_done
+            # (сработает позже из очереди событий и покажет финал в модалке).
+            self._topic_base = None
+            self._topic_options = None
             return
 
         job = q.next()

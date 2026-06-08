@@ -59,6 +59,7 @@ class ExportModal(ctk.CTkToplevel):
         self._export_dir: Optional[str] = None
         self._build()
         show_modal(self, app, resizable=(False, True))
+        self.protocol("WM_DELETE_WINDOW", self._on_close_window)
         self.after(100, lambda: setup_smooth_scroll(self, self._scroll))
 
     # ---- Build ----
@@ -260,7 +261,7 @@ class ExportModal(ctk.CTkToplevel):
         btn_frame = ctk.CTkFrame(self, fg_color="transparent")
         btn_frame.pack(fill="x", padx=pad, pady=(SPACING["sm"], pad))
 
-        self._close_btn = AppButton(btn_frame, text="Закрыть", variant="secondary", command=self.destroy)
+        self._close_btn = AppButton(btn_frame, text="Закрыть", variant="secondary", command=self._on_close_window)
         self._close_btn.pack(side="left", expand=True, fill="x", padx=(0, SPACING["sm"]))
 
         self._open_btn = AppButton(btn_frame, text="Открыть папку", variant="secondary",
@@ -341,6 +342,14 @@ class ExportModal(ctk.CTkToplevel):
 
     def _on_cancel(self) -> None:
         self._app.cancel_export()
+
+    def _on_close_window(self) -> None:
+        # Закрытие окна (крестик/«Закрыть») во время экспорта — отменяем работу,
+        # иначе воркер молча доедет до конца, а события полетят в мёртвый виджет.
+        if self._exporting:
+            self._app.cancel_export()
+        self._app.detach_export_modal(self)
+        self.destroy()
 
     def _open_folder(self) -> None:
         if self._export_dir and os.path.isdir(self._export_dir):
