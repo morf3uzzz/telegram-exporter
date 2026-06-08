@@ -22,6 +22,7 @@ from ..components.entry import AppEntry
 from ..components.progress_bar import ExportProgressWidget
 from ..modal_utils import prepare_modal, show_modal, setup_smooth_scroll
 from ...utils.dates import parse_local_date
+from ...core import forum
 
 if TYPE_CHECKING:
     from ..app import App
@@ -76,6 +77,29 @@ class ExportModal(ctk.CTkToplevel):
         ctk.CTkLabel(
             scroll, text=name, font=font_display(16, "bold"), text_color=C["text"], anchor="w",
         ).pack(padx=pad, pady=(pad, SPACING["xl"]), fill="x")
+
+        # ---- Топики форума (только для форум-супергрупп) ----
+        self._topic_vars: dict[int, tk.BooleanVar] = {}
+        self._topics: list = []
+        self._topics_section = ctk.CTkFrame(scroll, fg_color="transparent")
+        entity = getattr(self._dialog, "entity", None)
+        if forum.is_forum(entity):
+            self._topics_section.pack(fill="x", padx=0, pady=0)
+            self._add_section(self._topics_section, "Топики форума")
+            self._topics_all_var = tk.BooleanVar(value=True)
+            self._topics_all_cb = ctk.CTkCheckBox(
+                self._topics_section, text="Все топики", variable=self._topics_all_var,
+                font=font(13, "bold"), text_color=C["text"], command=self._on_topics_all,
+            )
+            self._topics_all_cb.pack(anchor="w", padx=SPACING["xl"], pady=(0, SPACING["xs"]))
+            self._topics_list_frame = ctk.CTkFrame(self._topics_section, fg_color="transparent")
+            self._topics_list_frame.pack(fill="x", padx=SPACING["xl"])
+            self._topics_status = ctk.CTkLabel(
+                self._topics_list_frame, text="Загрузка топиков…",
+                font=font(12), text_color=C["text_sec"], anchor="w",
+            )
+            self._topics_status.pack(anchor="w")
+            self._app.load_forum_topics(self._dialog, self)
 
         # ---- Период ----
         self._period_var = tk.StringVar(value="Все время")
@@ -305,10 +329,15 @@ class ExportModal(ctk.CTkToplevel):
         self._exporting = True
         self._start_btn.configure(state="disabled")
         self._progress.pack(fill="x", padx=SPACING["xl"], pady=(0, SPACING["sm"]))
-        self._progress.start(getattr(self._dialog, "name", "Чат"), None)
         self._result_lbl.configure(text="")
         self._open_btn.configure(state="disabled")
-        self._app.start_export(self._dialog, path, self)
+        selected = self.get_selected_topics()
+        if selected:
+            self._progress.start(f"Топиков: {len(selected)}", None)
+            self._app.start_topics_export(self._dialog, path, self, selected)
+        else:
+            self._progress.start(getattr(self._dialog, "name", "Чат"), None)
+            self._app.start_export(self._dialog, path, self)
 
     def _on_cancel(self) -> None:
         self._app.cancel_export()
@@ -355,6 +384,67 @@ class ExportModal(ctk.CTkToplevel):
         self._progress.hide()
         self._result_lbl.configure(text="Экспорт отменён", text_color=C["text_sec"])
         self._start_btn.configure(state="normal")
+
+    # ---- Топики форума ----
+
+    def set_topics(self, topics) -> None:
+        """Отрисовывает чекбоксы топиков (вызывается из App после загрузки)."""
+        self._topics = list(topics)
+        for w in self._topics_list_frame.winfo_children():
+            w.destroy()
+        self._topic_vars = {}
+        if not self._topics:
+            ctk.CTkLabel(self._topics_list_frame, text="Топиков не найдено",
+                         font=font(12), text_color=C["text_sec"]).pack(anchor="w")
+            return
+        for t in self._topics:
+            var = tk.BooleanVar(value=True)
+            self._topic_vars[t.id] = var
+            label = t.title + ("  🔒" if getattr(t, "closed", False) else "")
+            ctk.CTkCheckBox(
+                self._topics_list_frame, text=label, variable=var,
+                font=font(12), text_color=C["text"],
+                command=self._on_topic_toggle, checkbox_width=16, checkbox_height=16,
+            ).pack(anchor="w", pady=1)
+
+    def set_topics_error(self, message: str) -> None:
+        for w in self._topics_list_frame.winfo_children():
+            w.destroy()
+        ctk.CTkLabel(self._topics_list_frame, text=f"Ошибка загрузки топиков: {message}",
+                     font=font(12), text_color=C["error"], wraplength=520,
+                     anchor="w").pack(anchor="w")
+
+    def _on_topics_all(self) -> None:
+        val = self._topics_all_var.get()
+        for var in self._topic_vars.values():
+            var.set(val)
+
+    def _on_topic_toggle(self) -> None:
+        # Если сняли хоть один — «Все» гаснет; если все стоят — «Все» зажигается.
+        if self._topic_vars:
+            all_on = all(v.get() for v in self._topic_vars.values())
+            self._topics_all_var.set(all_on)
+
+    def get_selected_topics(self) -> list:
+        """Выбранные ForumTopic (для форума). Для обычного чата — []."""
+        if not self._topic_vars:
+            return []
+        chosen = {tid for tid, v in self._topic_vars.items() if v.get()}
+        return [t for t in self._topics if t.id in chosen]
+
+    def on_topic_progress(self, current: int, total: int, title: str) -> None:
+        self._progress.start(f"Топик {current}/{total}: {title}", None)
+
+    def on_topic_batch_done(self, export_dir: str, ok: int, failed: int) -> None:
+        self._export_dir = export_dir
+        self._exporting = False
+        self._progress.finish()
+        msg = f"✓ Топиков: {ok} успешно"
+        if failed:
+            msg += f", {failed} ошибок"
+        self._result_lbl.configure(text=f"{msg}\n{export_dir}", text_color=C["success"])
+        self._start_btn.configure(state="normal", text="Экспортировать ещё")
+        self._open_btn.configure(state="normal")
 
     # ---- Getters for App ----
 
