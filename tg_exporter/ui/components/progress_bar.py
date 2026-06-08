@@ -3,7 +3,7 @@ ExportProgressWidget — полоса прогресса с ETA, статусо�
 
 Показывает:
   - Название чата
-  - count / total (или просто count если total неизвестен)
+  - count / total (или «X сообщений» бегущим счётчиком, если total неизвестен)
   - ETA в секундах / минутах
   - Статусную строку (например "Транскрипция...")
   - Кнопку отмены
@@ -29,6 +29,7 @@ class ExportProgressWidget(ctk.CTkFrame):
         kwargs.setdefault("corner_radius", RADIUS["lg"])
         super().__init__(master, **kwargs)
         self._on_cancel = on_cancel
+        self._indeterminate = False  # режим бегущего бара (total неизвестен)
 
         # Строка 1: название + cancel
         top = ctk.CTkFrame(self, fg_color="transparent")
@@ -92,8 +93,13 @@ class ExportProgressWidget(ctk.CTkFrame):
     def start(self, chat_name: str, total: Optional[int]) -> None:
         """Показывает виджет и инициализирует начальное состояние."""
         self._chat_lbl.configure(text=chat_name)
-        self._bar.set(0)
-        self._count_lbl.configure(text="0" if total is None else f"0 / {total}")
+        if total and total > 0:
+            self._set_indeterminate(False)
+            self._bar.set(0)
+        else:
+            # total неизвестен (напр. топик с фильтром по дате) — бегущий бар.
+            self._set_indeterminate(True)
+        self._count_lbl.configure(text=format_count_label(0, total))
         self._eta_lbl.configure(text="")
         self._status_lbl.configure(text="")
         # finish() прячет кнопку отмены — восстанавливаем для нового запуска.
@@ -110,18 +116,36 @@ class ExportProgressWidget(ctk.CTkFrame):
     ) -> None:
         """Обновляет счётчик, прогресс-бар и ETA."""
         if total and total > 0:
+            self._set_indeterminate(False)
             ratio = min(count / total, 1.0)
             self._bar.set(ratio)
-            self._count_lbl.configure(text=f"{count:,} / {total:,}")
         else:
-            # Неопределённый прогресс — индикатор анимации
-            self._bar.set(0)
-            self._count_lbl.configure(text=f"{count:,}")
+            # Неопределённый прогресс — анимированный «бегущий» бар.
+            self._set_indeterminate(True)
+        self._count_lbl.configure(text=format_count_label(count, total))
 
         if eta_seconds is not None and eta_seconds > 0:
             self._eta_lbl.configure(text=f"≈ {_format_eta(eta_seconds)}")
         else:
             self._eta_lbl.configure(text="")
+
+    def _set_indeterminate(self, on: bool) -> None:
+        """Переключает бар между обычным и «бегущим» режимом (идемпотентно)."""
+        if on and not self._indeterminate:
+            try:
+                self._bar.set(0)  # сбрасываем прежнюю заливку перед анимацией
+                self._bar.configure(mode="indeterminate")
+                self._bar.start()
+            except Exception:
+                pass
+            self._indeterminate = True
+        elif not on and self._indeterminate:
+            try:
+                self._bar.stop()
+                self._bar.configure(mode="determinate")
+            except Exception:
+                pass
+            self._indeterminate = False
 
     def set_status(self, text: str) -> None:
         """Устанавливает текст статуса (напр. 'Транскрипция...')."""
@@ -132,6 +156,7 @@ class ExportProgressWidget(ctk.CTkFrame):
         Показывает полосу как прогресс-бар скачивания модели (0..1).
         Используется в фазе preload — когда реальный экспорт ещё не начался.
         """
+        self._set_indeterminate(False)
         r = max(0.0, min(1.0, ratio))
         self._bar.set(r)
         pct = int(r * 100)
@@ -142,6 +167,7 @@ class ExportProgressWidget(ctk.CTkFrame):
 
     def finish(self) -> None:
         """Заполняет бар до 100%, чистит метки и убирает кнопку отмены."""
+        self._set_indeterminate(False)
         self._bar.set(1.0)
         # Прячем кнопку, чтобы пользователь не пытался отменить уже завершённый
         # экспорт — disabled-вариант создавал ощущение «крестик не реагирует».
@@ -157,6 +183,7 @@ class ExportProgressWidget(ctk.CTkFrame):
         self._status_lbl.configure(text="")
 
     def hide(self) -> None:
+        self._set_indeterminate(False)
         self.pack_forget()
 
     def pack_or_show(self) -> None:
@@ -165,6 +192,30 @@ class ExportProgressWidget(ctk.CTkFrame):
 
 
 # ---- Helpers ----
+
+def format_count_label(count: int, total: Optional[int]) -> str:
+    """Текст счётчика: «X / Y» если знаменатель известен, иначе «X сообщений».
+
+    Для топиков с фильтром по дате точного total у Telegram дёшево нет —
+    тогда показываем честный бегущий счётчик без знаменателя.
+    """
+    if total and total > 0:
+        return f"{count:,} / {total:,}"
+    return f"{count:,} {_plural_messages(count)}"
+
+
+def _plural_messages(n: int) -> str:
+    """Русское склонение слова «сообщение» по числу."""
+    n = abs(int(n))
+    if 10 <= n % 100 <= 20:
+        return "сообщений"
+    tail = n % 10
+    if tail == 1:
+        return "сообщение"
+    if 2 <= tail <= 4:
+        return "сообщения"
+    return "сообщений"
+
 
 def _format_eta(seconds: float) -> str:
     if seconds < 60:
