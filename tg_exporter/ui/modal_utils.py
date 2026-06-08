@@ -127,6 +127,54 @@ def make_anchored_popup(parent, x: int, y: int, fg_color=None) -> ctk.CTkTopleve
     return popup
 
 
+def resolve_popup_position(
+    anchor_left: int,
+    anchor_top: int,
+    anchor_bottom: int,
+    popup_w: int,
+    popup_h: int,
+    screen_w: int,
+    screen_h: int,
+    margin: int = 4,
+) -> tuple[int, int]:
+    """Куда поставить popup (календарь/дропдаун) относительно кнопки-якоря.
+
+    По горизонтали: левый край у якоря, но не вылезаем за края экрана.
+    По вертикали: предпочтительно вниз под якорь; если снизу не помещается —
+    разворачиваем вверх над якорем. Если popup выше обеих зон — выбираем
+    сторону с большим запасом и прижимаем к краю.
+
+    Допущение: один монитор. screen_w/screen_h — размеры ОСНОВНОГО экрана
+    (winfo_screenwidth/height), а координаты якоря — виртуального рабочего
+    стола. На мультимониторе слева/сверху от основного (отрицательные
+    координаты) клэмп может прижать popup к краю основного экрана. Для
+    текущего UI это приемлемо.
+
+    Чистая функция (без Tk) — чтобы геометрию можно было покрыть тестами.
+    """
+    # X
+    x = anchor_left
+    if x + popup_w > screen_w - margin:
+        x = screen_w - popup_w - margin
+    if x < margin:
+        x = margin
+
+    # Y
+    if anchor_bottom + margin + popup_h <= screen_h:
+        y = anchor_bottom + margin
+    else:
+        above = anchor_top - margin - popup_h
+        if above >= margin:
+            y = above
+        else:
+            room_below = screen_h - (anchor_bottom + margin)
+            room_above = anchor_top - margin
+            y = margin if room_above >= room_below else (screen_h - popup_h - margin)
+            if y < margin:
+                y = margin
+    return int(x), int(y)
+
+
 def setup_smooth_scroll(modal, scrollable_frame) -> None:
     """
     Ускоряет колесо мыши на macOS (встроенный скролл CTkScrollableFrame там

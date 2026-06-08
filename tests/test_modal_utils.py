@@ -81,5 +81,59 @@ class TestSetupSmoothScroll(unittest.TestCase):
             self.setup(_FakeModal(), frame)  # не должно бросить
 
 
+class TestResolvePopupPosition(unittest.TestCase):
+    SCREEN_W = 1920
+    SCREEN_H = 1080
+
+    def setUp(self):
+        from tg_exporter.ui.modal_utils import resolve_popup_position
+        self.resolve = resolve_popup_position
+
+    def test_opens_below_when_room(self):
+        x, y = self.resolve(
+            anchor_left=100, anchor_top=90, anchor_bottom=120,
+            popup_w=240, popup_h=300,
+            screen_w=self.SCREEN_W, screen_h=self.SCREEN_H,
+        )
+        self.assertEqual(x, 100)
+        self.assertEqual(y, 124)  # под якорем: 120 + margin 4
+
+    def test_flips_up_when_no_room_below(self):
+        # Якорь у нижнего края экрана: снизу не помещается → разворот вверх.
+        x, y = self.resolve(
+            anchor_left=100, anchor_top=900, anchor_bottom=930,
+            popup_w=240, popup_h=300,
+            screen_w=self.SCREEN_W, screen_h=self.SCREEN_H,
+        )
+        self.assertEqual(x, 100)
+        self.assertEqual(y, 900 - 4 - 300)  # 596 — над якорем
+
+    def test_clamps_to_right_edge(self):
+        x, y = self.resolve(
+            anchor_left=1850, anchor_top=90, anchor_bottom=120,
+            popup_w=240, popup_h=300,
+            screen_w=self.SCREEN_W, screen_h=self.SCREEN_H,
+        )
+        self.assertEqual(x, self.SCREEN_W - 240 - 4)  # 1676
+        self.assertEqual(y, 124)
+
+    def test_clamps_to_left_edge(self):
+        x, _y = self.resolve(
+            anchor_left=-50, anchor_top=90, anchor_bottom=120,
+            popup_w=240, popup_h=300,
+            screen_w=self.SCREEN_W, screen_h=self.SCREEN_H,
+        )
+        self.assertEqual(x, 4)
+
+    def test_too_tall_for_either_side_picks_larger_gap(self):
+        # popup выше обеих зон; сверху запас больше → прижать к верху.
+        _x, y = self.resolve(
+            anchor_left=100, anchor_top=400, anchor_bottom=430,
+            popup_w=240, popup_h=480,
+            screen_w=self.SCREEN_W, screen_h=500,
+        )
+        self.assertEqual(y, 4)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -16,7 +16,7 @@ import customtkinter as ctk
 from typing import Callable, Optional
 
 from .button import AppButton
-from ..modal_utils import make_anchored_popup
+from ..modal_utils import make_anchored_popup, resolve_popup_position
 from ..theme import C, RADIUS, SPACING, font
 
 
@@ -62,6 +62,7 @@ class DatePickerButton(AppButton):
         self._popup: Optional[ctk.CTkToplevel] = None
         self._outside_host: Optional[tk.Misc] = None
         self._outside_bind_id: Optional[str] = None
+        self._follow_bind_id: Optional[str] = None
         # Если кнопку уничтожают, пока popup открыт — popup останется висеть
         # отдельным окном.
         self.bind("<Destroy>", lambda _e: self._close_popup(), add="+")
@@ -83,12 +84,22 @@ class DatePickerButton(AppButton):
                 pass
 
         try:
-            x = self.winfo_rootx()
-            y = self.winfo_rooty() + self.winfo_height() + 4
+            anchor_left = self.winfo_rootx()
+            anchor_top = self.winfo_rooty()
+            anchor_bottom = anchor_top + self.winfo_height()
         except tk.TclError:
             return
 
-        popup = make_anchored_popup(self, x, y, fg_color=C["card"])
+        # Создаём popup, наполняем, затем меряем и решаем — вниз под иконкой
+        # или вверх над ней (если снизу не помещается). До измерения прячем,
+        # чтобы не мелькнул в промежуточной позиции.
+        popup = make_anchored_popup(
+            self, anchor_left, anchor_bottom + 4, fg_color=C["card"],
+        )
+        try:
+            popup.withdraw()
+        except tk.TclError:
+            pass
         _CalendarFrame(popup, initial=initial, on_pick=self._commit).pack(
             padx=SPACING["sm"], pady=(SPACING["sm"], SPACING["xs"]),
         )
@@ -96,6 +107,23 @@ class DatePickerButton(AppButton):
             popup, text="Закрыть", variant="ghost", size="sm",
             command=self._close_popup,
         ).pack(padx=SPACING["sm"], pady=(0, SPACING["sm"]), fill="x")
+
+        # Финальная позиция по фактическому размеру popup и размеру экрана.
+        try:
+            popup.update_idletasks()
+            px, py = resolve_popup_position(
+                anchor_left, anchor_top, anchor_bottom,
+                popup.winfo_reqwidth(), popup.winfo_reqheight(),
+                self.winfo_screenwidth(), self.winfo_screenheight(),
+            )
+            popup.geometry(f"+{px}+{py}")
+        except tk.TclError:
+            pass
+        try:
+            popup.deiconify()
+        except tk.TclError:
+            pass
+
         popup.bind("<Escape>", lambda _e: self._close_popup())
         popup.after(50, popup.focus_set)
         self._popup = popup
@@ -112,6 +140,11 @@ class DatePickerButton(AppButton):
             self._outside_host = host
             self._outside_bind_id = host.bind(
                 "<Button-1>", self._on_outside_click, add="+",
+            )
+            # Popup — отдельное окно с абсолютными координатами, само за окном
+            # не следует. Двигаем его за пикером при перемещении/ресайзе хоста.
+            self._follow_bind_id = host.bind(
+                "<Configure>", self._follow_host, add="+",
             )
 
     def _on_outside_click(self, event) -> None:
@@ -139,6 +172,29 @@ class DatePickerButton(AppButton):
             widget = getattr(widget, "master", None)
         return False
 
+    def _follow_host(self, event=None) -> None:
+        """Двигает открытый popup за пикером при сдвиге/ресайзе окна-хоста."""
+        if self._popup is None or not self._popup.winfo_exists():
+            return
+        # Только Configure самого окна-хоста, не его детей: bindtags Tk
+        # прокидывают событие на родителя, иначе — шквал лишних вызовов.
+        if event is not None and self._outside_host is not None:
+            if str(event.widget) != str(self._outside_host):
+                return
+        try:
+            anchor_left = self.winfo_rootx()
+            anchor_top = self.winfo_rooty()
+            anchor_bottom = anchor_top + self.winfo_height()
+            pw = max(self._popup.winfo_width(), self._popup.winfo_reqwidth())
+            ph = max(self._popup.winfo_height(), self._popup.winfo_reqheight())
+            px, py = resolve_popup_position(
+                anchor_left, anchor_top, anchor_bottom, pw, ph,
+                self.winfo_screenwidth(), self.winfo_screenheight(),
+            )
+            self._popup.geometry(f"+{px}+{py}")
+        except tk.TclError:
+            pass
+
     def _commit(self, value: str) -> None:
         self._target.set(value)
         if self._on_pick is not None:
@@ -146,13 +202,20 @@ class DatePickerButton(AppButton):
         self._close_popup()
 
     def _close_popup(self) -> None:
-        if self._outside_host is not None and self._outside_bind_id is not None:
-            try:
-                self._outside_host.unbind("<Button-1>", self._outside_bind_id)
-            except tk.TclError:
-                pass
+        if self._outside_host is not None:
+            if self._outside_bind_id is not None:
+                try:
+                    self._outside_host.unbind("<Button-1>", self._outside_bind_id)
+                except tk.TclError:
+                    pass
+            if self._follow_bind_id is not None:
+                try:
+                    self._outside_host.unbind("<Configure>", self._follow_bind_id)
+                except tk.TclError:
+                    pass
         self._outside_host = None
         self._outside_bind_id = None
+        self._follow_bind_id = None
         if self._popup is not None:
             try:
                 if self._popup.winfo_exists():
@@ -200,14 +263,16 @@ class _CalendarFrame(ctk.CTkFrame):
             nav, text="", font=font(13, "bold"), text_color=C["text"],
         )
         self._title_lbl.pack(side="left", expand=True)
-        AppButton(
-            nav, text="›", variant="ghost", size="sm", width=24,
-            command=lambda: self._shift_month(1),
-        ).pack(side="right", padx=(0, SPACING["xs"]))
+        # Зеркально левой стороне: год — снаружи, месяц — внутри.
+        # Итог симметричен: « ‹  Месяц Год  › »
         AppButton(
             nav, text="»", variant="ghost", size="sm", width=28,
             command=lambda: self._shift_year(1),
         ).pack(side="right")
+        AppButton(
+            nav, text="›", variant="ghost", size="sm", width=24,
+            command=lambda: self._shift_month(1),
+        ).pack(side="right", padx=(0, SPACING["xs"]))
 
         # Заголовки дней недели
         headers = ctk.CTkFrame(self, fg_color="transparent")

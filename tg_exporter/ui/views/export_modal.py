@@ -105,10 +105,10 @@ class ExportModal(ctk.CTkToplevel):
         # ---- Период ----
         self._period_var = tk.StringVar(value="Все время")
         self._add_section(scroll, "Период")
-        period_row = ctk.CTkFrame(scroll, fg_color="transparent")
-        period_row.pack(fill="x", padx=pad, pady=(0, SPACING["md"]))
+        self._period_row = ctk.CTkFrame(scroll, fg_color="transparent")
+        self._period_row.pack(fill="x", padx=pad, pady=(0, SPACING["md"]))
         ctk.CTkOptionMenu(
-            period_row,
+            self._period_row,
             values=_PERIOD_OPTIONS,
             variable=self._period_var,
             width=200, height=WIDGET["entry_h_sm"],
@@ -282,7 +282,11 @@ class ExportModal(ctk.CTkToplevel):
     def _on_period_change(self, value: str) -> None:
         if value == "Свой период":
             if not self._date_row.winfo_ismapped():
-                self._date_row.pack(fill="x", padx=SPACING["xl"], pady=(0, SPACING["sm"]))
+                # Сразу под дропдауном «Период», а не в конце модалки.
+                self._date_row.pack(
+                    fill="x", padx=SPACING["xl"], pady=(0, SPACING["sm"]),
+                    after=self._period_row,
+                )
         else:
             if self._date_row.winfo_ismapped():
                 self._date_row.pack_forget()
