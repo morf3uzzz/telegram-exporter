@@ -161,7 +161,15 @@ class App(ctk.CTk):
         # принудительный SetWindowPos. Здесь страхуемся через <Map>.
         self.update_idletasks()
         self._ensure_visible()
-        self.bind("<Map>", lambda _e: self._ensure_visible())
+        self.bind("<Map>", self._on_map)
+
+    def _on_map(self, event) -> None:
+        # <Map> на toplevel ловит события ВСЕХ дочерних виджетов: путь "."
+        # входит в bindtags каждого потомка, поэтому при старте/открытии модалок
+        # хендлер дёргается сотнями. Нас интересует только разворачивание
+        # самого окна (deiconify из таскбара) — остальное отсекаем по пути.
+        if str(event.widget) == str(self):
+            self._ensure_visible()
 
     def _ensure_visible(self) -> None:
         """Если окно вне видимой области primary-монитора — центрируем его."""
