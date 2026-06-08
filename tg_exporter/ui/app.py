@@ -29,7 +29,7 @@ from .views.help_page import HelpPage
 from .views.export_modal import ExportModal
 from .components.sidebar import Sidebar
 
-from ..models.config import AppConfig
+from ..models.config import AppConfig, clamp_ui_scale
 from ..models.export_task import ExportTask, ExportProgress, ExportFormat, AuthorFilter
 from ..core.credentials import CredentialsManager
 from ..core.client import TelegramClientManager
@@ -37,6 +37,7 @@ from ..core.auth import AuthService, AuthStep, QrNeedsPassword
 from ..core.orchestrator import ExportOrchestrator
 from ..core.profiles import ProfileManager, Profile
 from ..core import forum
+from ..core.chat_kind import chat_kind, KIND_ORDER
 from ..core.export_queue import ExportQueue, build_topic_jobs
 from ..services.export_history import ExportHistory
 from ..utils.cancellation import CancellationToken
@@ -75,6 +76,9 @@ class App(ctk.CTk):
         self.config = AppConfig.load()
         self.credentials = CredentialsManager()
         self._migrate_legacy_config()
+        # Масштаб интерфейса из конфига — ДО построения страниц (сайдбар, чаты),
+        # чтобы нативный список сразу посчитался под нужный масштаб.
+        ctk.set_widget_scaling(clamp_ui_scale(self.config.ui_scale))
 
         # Phase 2: сервисы
         self._client_mgr = TelegramClientManager(self.config, self.credentials)
@@ -91,6 +95,7 @@ class App(ctk.CTk):
         self._folder_filters: dict = {}
         self._folder_excludes: dict = {}
         self._current_folder: str = "Все чаты"
+        self._enabled_kinds: set = set(KIND_ORDER)  # фильтр по типу чата (по умолч. все)
         self._date_period_days: int = 0
         self._custom_date_from: Optional[datetime.datetime] = None
         self._custom_date_to: Optional[datetime.datetime] = None
@@ -394,6 +399,8 @@ class App(ctk.CTk):
 
     def filter_chats(self, query: str = "") -> None:
         dialogs = self._get_folder_dialogs(self._current_folder)
+        if len(self._enabled_kinds) < len(KIND_ORDER):
+            dialogs = [d for d in dialogs if chat_kind(d) in self._enabled_kinds]
         if query:
             q = query.lower()
             dialogs = [d for d in dialogs if q in (d.name or "").lower()]
@@ -401,6 +408,10 @@ class App(ctk.CTk):
 
     def set_current_folder(self, folder_name: str) -> None:
         self._current_folder = folder_name or "Все чаты"
+
+    def set_kind_filter(self, kinds) -> None:
+        """Какие типы чатов показывать (множество ключей KIND_ORDER)."""
+        self._enabled_kinds = set(kinds) if kinds else set(KIND_ORDER)
 
     def set_date_period(self, days: int) -> None:
         self._date_period_days = max(0, int(days))
@@ -654,6 +665,20 @@ class App(ctk.CTk):
     def set_local_whisper_model(self, model: str) -> None:
         self.config = _update_config(self.config, local_whisper_model=model or "base")
         self.config.save()
+
+    def set_ui_scale(self, value) -> None:
+        """Применяет масштаб интерфейса вживую (CTk + нативный список) и сохраняет."""
+        scale = clamp_ui_scale(value)
+        ctk.set_widget_scaling(scale)
+        try:
+            self.chats_page.apply_scale()
+        except Exception:
+            pass
+        self.config = _update_config(self.config, ui_scale=scale)
+        try:
+            self.config.save()
+        except Exception as exc:
+            logger.warning(f"save ui_scale failed: {exc}")
 
     # ---- Background tasks ----
 

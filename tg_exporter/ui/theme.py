@@ -10,10 +10,19 @@ from __future__ import annotations
 import platform
 import customtkinter as ctk
 
+from ..models.config import UI_SCALE_DEFAULT
+
 # ---- Режим темы ----
 
 ctk.set_appearance_mode("System")
 ctk.set_default_color_theme("blue")
+
+# Дефолтный масштаб виджетов до загрузки конфига (App затем применяет
+# config.ui_scale). Берём из единой точки правды UI_SCALE_DEFAULT, чтобы не
+# дублировать магическое число. После DPI-фикса (System-DPI-aware в main.py —
+# чинит сворачивание окна на Win11) шрифты следуют масштабу Windows; этот
+# множитель их поджимает, DPI-осознанность при этом не трогаем.
+ctk.set_widget_scaling(UI_SCALE_DEFAULT)
 
 
 # ---- Шрифты по платформе ----
@@ -36,6 +45,21 @@ def font(size: int = 13, weight: str = "normal") -> tuple:
 
 def font_display(size: int = 20, weight: str = "bold") -> tuple:
     return (FONT_DISPLAY, size, weight) if weight != "normal" else (FONT_DISPLAY, size)
+
+
+def scaled_font_px(scale: float) -> int:
+    """Размер шрифта для нативных tk/ttk-виджетов (напр. Treeview) в пикселях.
+
+    Нативные виджеты НЕ следуют за CTk widget-scaling, поэтому размер считаем
+    сами под текущий масштаб окна. Отрицательное значение в Tk = пиксели (как
+    внутри CTk) — это и даёт совпадение со скейлингом CTk-виджетов. Нижняя
+    граница 8px — чтобы при крошечном масштабе текст не исчез.
+    """
+    try:
+        s = float(scale)
+    except (TypeError, ValueError):
+        s = 1.0
+    return -max(8, int(round(14 * s)))
 
 
 # ---- Цвета (light, dark) ----

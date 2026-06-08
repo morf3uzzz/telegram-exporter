@@ -20,6 +20,7 @@ from ..theme import C, SPACING, WIDGET, font, font_display
 from ..components.button import AppButton
 from ..components.entry import AppEntry
 from ..modal_utils import setup_smooth_scroll
+from ...models.config import UI_SCALES
 
 if TYPE_CHECKING:
     from ..app import App
@@ -91,6 +92,14 @@ class SettingsPage(ctk.CTkFrame):
 
         # ── Секция Экспорт по умолчанию ───────────────────────────────────
         self._build_export_section(s)
+
+        # ── Разделитель ───────────────────────────────────────────────────
+        ctk.CTkFrame(s, height=1, fg_color=C["border"]).pack(
+            fill="x", pady=(SPACING["lg"], SPACING["md"]),
+        )
+
+        # ── Секция Интерфейс ──────────────────────────────────────────────
+        self._build_interface_section(s)
 
         # ── Низ страницы: статус + Сохранить ──────────────────────────────
         btn_row = ctk.CTkFrame(self, fg_color="transparent")
@@ -209,6 +218,30 @@ class SettingsPage(ctk.CTkFrame):
             onvalue=True, offvalue=False,
         ).pack(anchor="w", pady=(SPACING["xs"], SPACING["sm"]))
 
+    def _build_interface_section(self, s) -> None:
+        """Масштаб интерфейса — применяется сразу, без кнопки «Сохранить»."""
+        self._section(s, "Интерфейс")
+        self._row_label(s, "Масштаб интерфейса")
+        self._scale_menu = ctk.CTkOptionMenu(
+            s,
+            values=[f"{int(v * 100)}%" for v in UI_SCALES],
+            command=self._on_scale_change,
+            height=WIDGET["entry_h_sm"], font=font(13),
+        )
+        self._scale_menu.pack(fill="x", pady=(SPACING["xs"], SPACING["xs"]))
+        ctk.CTkLabel(
+            s, text="Размер шрифтов и элементов интерфейса. Применяется сразу.",
+            font=font(11), text_color=C["text_dim"],
+            wraplength=420, justify="left", anchor="w",
+        ).pack(fill="x")
+
+    def _on_scale_change(self, display_val: str) -> None:
+        try:
+            value = int(display_val.rstrip("%")) / 100.0
+        except ValueError:
+            return
+        self._app.set_ui_scale(value)
+
     # ------------------------------------------------------------------ helpers
 
     def _section(self, parent, text: str) -> None:
@@ -285,6 +318,9 @@ class SettingsPage(ctk.CTkFrame):
         md_cfg = cfg.markdown
         self._include_author_var.set(getattr(md_cfg, "include_author", True))
         self._include_ts_var.set(getattr(md_cfg, "include_timestamps", True))
+
+        # Масштаб интерфейса
+        self._scale_menu.set(f"{int(round(cfg.ui_scale * 100))}%")
 
     def _save(self) -> None:
         import dataclasses

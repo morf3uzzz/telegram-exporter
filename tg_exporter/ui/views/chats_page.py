@@ -1,22 +1,29 @@
 """
-ChatsPage — страница списка чатов: список чатов, фильтры, поиск.
+ChatsPage — страница списка чатов: таблица чатов (тип + название), фильтры, поиск.
 
 Глобальные кнопки шапки (Инструкция / Выход / Настройки / Аккаунт)
 вынесены в сайдбар. Здесь остаётся только список чатов и его фильтры.
 Опции экспорта вынесены в ExportModal (открывается по кнопке).
+
+Список — ttk.Treeview (две колонки: Тип | Название), стилизованный под тёмную
+тему через ttk.Style (тема clam, иначе Windows-тема игнорирует цвета). Размер
+шрифта и высота строки считаются под текущий масштаб окна (как CTk-виджеты).
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Optional
 import tkinter as tk
+from tkinter import ttk
 import customtkinter as ctk
 
-from ..theme import C, RADIUS, SPACING, WIDGET, font, font_display
+from ..theme import C, RADIUS, SPACING, WIDGET, font, font_display, scaled_font_px
 from ..components.button import AppButton
 from ..components.date_range_row import DateRangeRow
 from ..components.entry import AppEntry
 from ..components.tooltip import Tooltip
+from ..modal_utils import make_anchored_popup, resolve_popup_position
+from ...core.chat_kind import chat_kind, KIND_LABELS, KIND_ORDER
 from ...utils.dates import parse_local_date
 
 if TYPE_CHECKING:
@@ -37,9 +44,9 @@ class ChatsPage(ctk.CTkFrame):
         [Header]     Чаты | Обновить
         [Toolbar]    Папка ▾  |  Период ▾  |  Экспортировать папку
         [DateRange]  (видима только при "Свой период")
-        [Search]     🔍 Поиск чатов...
+        [Search]     🔍 Поиск чатов...   [Тип ▾]
         [Status]     Чатов: 42
-        [List]       Прокручиваемый список
+        [List]       Таблица: Тип | Название
         [Export]     Экспортировать выбранный чат
     """
 
@@ -47,12 +54,19 @@ class ChatsPage(ctk.CTkFrame):
         super().__init__(master, fg_color="transparent")
         self._app = app
         self._dialogs: list = []
-        self._dialog_map: dict[int, object] = {}
+        self._dialog_map: dict[str, object] = {}
         self._folder_names: list[str] = ["Все чаты"]
         self._folder_var = tk.StringVar(value="Все чаты")
         self._period_var = tk.StringVar(value="Все время")
         self._date_from_var = tk.StringVar()
         self._date_to_var = tk.StringVar()
+        # Фильтр по типу чата
+        self._kind_vars: dict[str, tk.BooleanVar] = {
+            k: tk.BooleanVar(value=True) for k in KIND_ORDER
+        }
+        self._kind_popup: Optional[ctk.CTkToplevel] = None
+        self._kind_host: Optional[tk.Misc] = None
+        self._kind_bind_id: Optional[str] = None
         self._build()
 
     # ---- Build ----
@@ -169,10 +183,19 @@ class ChatsPage(ctk.CTkFrame):
             leading_pad=SPACING["xl"],
         )
 
-        # === ПОИСК ===
-        self._search_entry = AppEntry(self, placeholder_text="🔍  Поиск чатов...")
-        self._search_entry.pack(fill="x", padx=SPACING["xl"], pady=(SPACING["md"], SPACING["xs"]))
+        # === ПОИСК + ФИЛЬТР ТИПА ===
+        search_row = ctk.CTkFrame(self, fg_color="transparent")
+        search_row.pack(fill="x", padx=SPACING["xl"], pady=(SPACING["md"], SPACING["xs"]))
+
+        self._search_entry = AppEntry(search_row, placeholder_text="🔍  Поиск чатов...")
+        self._search_entry.pack(side="left", fill="x", expand=True)
         self._search_entry.bind("<KeyRelease>", self._on_search)
+
+        self._kind_btn = AppButton(
+            search_row, text="Тип ▾", variant="secondary", size="md",
+            command=self._open_kind_filter, width=92,
+        )
+        self._kind_btn.pack(side="left", padx=(SPACING["sm"], 0))
 
         # === СТАТУС ===
         self._status_lbl = ctk.CTkLabel(
@@ -180,33 +203,44 @@ class ChatsPage(ctk.CTkFrame):
         )
         self._status_lbl.pack(fill="x", padx=SPACING["xl"] + SPACING["xs"], pady=(0, SPACING["xs"]))
 
-        # === СПИСОК ЧАТОВ ===
+        # === СПИСОК ЧАТОВ (ttk.Treeview, 2 колонки) ===
         list_frame = ctk.CTkFrame(self, fg_color="transparent")
         list_frame.pack(fill="both", expand=True, padx=SPACING["md"], pady=(0, SPACING["xs"]))
 
-        self._listbox = tk.Listbox(
-            list_frame,
-            activestyle="none",
-            selectmode=tk.SINGLE,
-            borderwidth=0,
-            highlightthickness=1,
-            relief="flat",
-            font=(font(14)[0], 14),
-            bg=self._ctk_color(C["card"]),
-            fg=self._ctk_color(C["text"]),
-            selectbackground=self._ctk_color(C["primary"]),
-            selectforeground="#FFFFFF",
-            highlightbackground=self._ctk_color(C["border"]),
-            highlightcolor=self._ctk_color(C["border"]),
-            cursor="hand2",
-        )
-        scrollbar = tk.Scrollbar(list_frame, orient="vertical", command=self._listbox.yview)
-        self._listbox.configure(yscrollcommand=scrollbar.set)
-        self._listbox.pack(side="left", fill="both", expand=True)
-        scrollbar.pack(side="right", fill="y")
+        # ttk.Style глобален на процесс; в приложении ttk используется ТОЛЬКО
+        # здесь (Treeview + его скроллбар), поэтому смена темы на clam ни на что
+        # больше не влияет. clam, в отличие от vista/xpnative, разрешает
+        # переопределять фон/выделение — без него тёмная тема не применится.
+        self._tree_style = ttk.Style()
+        try:
+            self._tree_style.theme_use("clam")
+        except tk.TclError:
+            pass
 
-        self._listbox.bind("<Double-Button-1>", self._on_double_click)
-        self._listbox.bind("<Return>", self._on_double_click)
+        self._tree = ttk.Treeview(
+            list_frame,
+            columns=("kind", "name"),
+            show="headings",
+            selectmode="browse",
+            style="Chats.Treeview",
+        )
+        self._tree.heading("kind", text="Тип", anchor="w")
+        self._tree.heading("name", text="Название", anchor="w")
+        self._tree.column("kind", width=96, minwidth=64, stretch=False, anchor="w")
+        self._tree.column("name", width=320, minwidth=140, stretch=True, anchor="w")
+
+        vsb = ttk.Scrollbar(
+            list_frame, orient="vertical", command=self._tree.yview,
+            style="Chats.Vertical.TScrollbar",
+        )
+        self._tree.configure(yscrollcommand=vsb.set)
+        self._tree.pack(side="left", fill="both", expand=True)
+        vsb.pack(side="right", fill="y")
+
+        self._tree.bind("<Double-1>", self._on_double_click)
+        self._tree.bind("<Return>", self._on_double_click)
+
+        self._apply_tree_style()
 
         # === КНОПКА ЭКСПОРТА ===
         self._export_btn = AppButton(
@@ -215,11 +249,67 @@ class ChatsPage(ctk.CTkFrame):
         )
         self._export_btn.pack(fill="x", padx=SPACING["xl"], pady=(0, SPACING["lg"]))
 
+    # ---- Масштаб / тема таблицы ----
+
+    def _tree_scale(self) -> float:
+        try:
+            return ctk.ScalingTracker.get_widget_scaling(self)
+        except Exception:
+            return 1.0
+
+    def _apply_tree_style(self) -> None:
+        """Конфигурирует ttk-стиль таблицы под тёмную тему и текущий масштаб."""
+        scale = self._tree_scale()
+        fam = font(14)[0]
+        size_px = abs(scaled_font_px(scale))             # размер шрифта в пикселях
+        rowheight = max(20, int(round(size_px * 2.0)))   # высота строки
+        card = self._ctk_color(C["card"])
+        text = self._ctk_color(C["text"])
+        text_sec = self._ctk_color(C["text_sec"])
+        primary = self._ctk_color(C["primary"])
+        surface = self._ctk_color(C["surface"])
+        border = self._ctk_color(C["border"])
+
+        st = self._tree_style
+        st.configure(
+            "Chats.Treeview",
+            background=card, fieldbackground=card, foreground=text,
+            borderwidth=0, relief="flat", rowheight=rowheight, font=(fam, -size_px),
+        )
+        st.map(
+            "Chats.Treeview",
+            background=[("selected", primary)],
+            foreground=[("selected", "#FFFFFF")],
+        )
+        st.configure(
+            "Chats.Treeview.Heading",
+            background=surface, foreground=text_sec, relief="flat",
+            borderwidth=0, font=(fam, -size_px), padding=(SPACING["xs"], SPACING["xs"]),
+        )
+        st.map("Chats.Treeview.Heading", background=[("active", surface)])
+        st.configure(
+            "Chats.Vertical.TScrollbar",
+            background=surface, troughcolor=card, bordercolor=card,
+            arrowcolor=text_sec, borderwidth=0,
+        )
+        st.map("Chats.Vertical.TScrollbar", background=[("active", border)])
+        try:
+            self._tree.column("kind", width=int(round(96 * scale)))
+        except Exception:
+            pass
+
+    def apply_scale(self) -> None:
+        """Пересчитать стиль таблицы под новый масштаб (live-смена из настроек)."""
+        try:
+            self._apply_tree_style()
+        except Exception:
+            pass
+
     # ---- Public API ----
 
     def show_loading(self, text: str = "Загрузка чатов...") -> None:
         self._status_lbl.configure(text=text)
-        self._listbox.delete(0, tk.END)
+        self._tree.delete(*self._tree.get_children())
 
     def show_refreshing(self) -> None:
         """Мягкий «обновление» без чистки списка — старые чаты остаются
@@ -231,13 +321,18 @@ class ChatsPage(ctk.CTkFrame):
     def render_chats(self, dialogs: list) -> None:
         self._dialogs = dialogs or []
         self._dialog_map = {}
-        self._listbox.delete(0, tk.END)
+        self._tree.delete(*self._tree.get_children())
         if not self._dialogs:
             self._status_lbl.configure(text="Ничего не найдено")
             return
         for i, d in enumerate(self._dialogs):
-            self._listbox.insert(tk.END, f"  {d.name or 'Без названия'}")
-            self._dialog_map[i] = d
+            iid = str(i)
+            kind_label = KIND_LABELS.get(chat_kind(d), "")
+            self._tree.insert(
+                "", tk.END, iid=iid,
+                values=(kind_label, d.name or "Без названия"),
+            )
+            self._dialog_map[iid] = d
         self._status_lbl.configure(text=f"Чатов: {len(self._dialogs)}")
 
     def set_folders(self, folder_names: list[str]) -> None:
@@ -250,7 +345,7 @@ class ChatsPage(ctk.CTkFrame):
         self._status_lbl.configure(text=text)
 
     def selected_dialog(self) -> Optional[object]:
-        sel = self._listbox.curselection()
+        sel = self._tree.selection()
         if not sel:
             return None
         return self._dialog_map.get(sel[0])
@@ -296,9 +391,108 @@ class ChatsPage(ctk.CTkFrame):
             transcribe=self._folder_transcribe_var.get(),
         )
 
+    # ---- Фильтр по типу чата (popup с галочками) ----
+
+    def _open_kind_filter(self) -> None:
+        # Повторный клик по кнопке закрывает уже открытый popup.
+        if self._kind_popup is not None and self._kind_popup.winfo_exists():
+            self._close_kind_popup()
+            return
+        try:
+            anchor_left = self._kind_btn.winfo_rootx()
+            anchor_top = self._kind_btn.winfo_rooty()
+            anchor_bottom = anchor_top + self._kind_btn.winfo_height()
+        except tk.TclError:
+            return
+
+        popup = make_anchored_popup(self, anchor_left, anchor_bottom + 4, fg_color=C["card"])
+        try:
+            popup.withdraw()
+        except tk.TclError:
+            pass
+        inner = ctk.CTkFrame(popup, fg_color="transparent")
+        inner.pack(padx=SPACING["sm"], pady=SPACING["sm"])
+        ctk.CTkLabel(
+            inner, text="Показывать типы", font=font(12, "bold"), text_color=C["text"],
+        ).pack(anchor="w", pady=(0, SPACING["xs"]))
+        for k in KIND_ORDER:
+            ctk.CTkCheckBox(
+                inner, text=KIND_LABELS[k], variable=self._kind_vars[k],
+                command=self._on_kind_toggle, font=font(13), text_color=C["text"],
+                checkbox_width=18, checkbox_height=18, corner_radius=4,
+            ).pack(anchor="w", pady=2)
+
+        try:
+            popup.update_idletasks()
+            px, py = resolve_popup_position(
+                anchor_left, anchor_top, anchor_bottom,
+                popup.winfo_reqwidth(), popup.winfo_reqheight(),
+                self.winfo_screenwidth(), self.winfo_screenheight(),
+            )
+            popup.geometry(f"+{px}+{py}")
+        except tk.TclError:
+            pass
+        try:
+            popup.deiconify()
+        except tk.TclError:
+            pass
+        popup.bind("<Escape>", lambda _e: self._close_kind_popup())
+        popup.after(50, popup.focus_set)
+        self._kind_popup = popup
+
+        try:
+            host = self.winfo_toplevel()
+        except tk.TclError:
+            host = None
+        if host is not None:
+            self._kind_host = host
+            self._kind_bind_id = host.bind("<Button-1>", self._on_kind_outside, add="+")
+
+    def _on_kind_outside(self, event) -> None:
+        if self._kind_popup is None or not self._kind_popup.winfo_exists():
+            return
+        w = event.widget
+        try:
+            if w.winfo_toplevel() is self._kind_popup:
+                return
+        except tk.TclError:
+            return
+        # Клик по самой кнопке — пусть её command сделает toggle.
+        node = w
+        while node is not None:
+            if node is self._kind_btn:
+                return
+            node = getattr(node, "master", None)
+        self._close_kind_popup()
+
+    def _close_kind_popup(self) -> None:
+        if self._kind_host is not None and self._kind_bind_id is not None:
+            try:
+                self._kind_host.unbind("<Button-1>", self._kind_bind_id)
+            except tk.TclError:
+                pass
+        self._kind_host = None
+        self._kind_bind_id = None
+        if self._kind_popup is not None:
+            try:
+                if self._kind_popup.winfo_exists():
+                    self._kind_popup.destroy()
+            except tk.TclError:
+                pass
+            self._kind_popup = None
+
+    def _on_kind_toggle(self) -> None:
+        enabled = {k for k, v in self._kind_vars.items() if v.get()}
+        self._app.set_kind_filter(enabled)
+        self._app.filter_chats(self._search_entry.get().strip())
+        n, total = len(enabled), len(KIND_ORDER)
+        try:
+            self._kind_btn.configure(text="Тип ▾" if n == total else f"Тип ({n}) ▾")
+        except Exception:
+            pass
+
     # ---- Helpers ----
 
     def _ctk_color(self, pair) -> str:
-        """Возвращает строку цвета для нативного tk.Listbox."""
-        import customtkinter as ctk
+        """Возвращает строку цвета (light/dark) для нативных tk/ttk-виджетов."""
         return pair[0] if ctk.get_appearance_mode() == "Light" else pair[1]
