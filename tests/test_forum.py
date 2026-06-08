@@ -23,5 +23,62 @@ class TestIsForum(unittest.TestCase):
         self.assertFalse(forum.is_forum(None))
 
 
+class _FakeTopics:
+    """Имитация messages.ForumTopics из GetForumTopicsRequest."""
+
+    def __init__(self, topics, count):
+        self.topics = topics
+        self.count = count
+
+
+def _topic(tid, title, closed=False, hidden=False):
+    return types.SimpleNamespace(id=tid, title=title, closed=closed, hidden=hidden)
+
+
+def _deleted(tid):
+    # ForumTopicDeleted: только id, без title
+    return types.SimpleNamespace(id=tid)
+
+
+class TestGetForumTopics(unittest.TestCase):
+    def test_single_page(self):
+        client = MagicMock()
+        client.return_value = _FakeTopics(
+            topics=[_topic(1, "General"), _topic(2, "Bug reports", closed=True)],
+            count=2,
+        )
+        result = forum.get_forum_topics(client, entity="E")
+        self.assertEqual([(t.id, t.title, t.closed) for t in result],
+                         [(1, "General", False), (2, "Bug reports", True)])
+
+    def test_skips_deleted(self):
+        client = MagicMock()
+        client.return_value = _FakeTopics(
+            topics=[_topic(1, "General"), _deleted(99), _topic(2, "Флудильня")],
+            count=3,
+        )
+        result = forum.get_forum_topics(client, entity="E")
+        self.assertEqual([t.id for t in result], [1, 2])  # 99 пропущен
+
+    def test_pagination_two_pages(self):
+        client = MagicMock()
+        page1 = _FakeTopics(topics=[_topic(i, f"t{i}") for i in range(1, 101)], count=150)
+        page2 = _FakeTopics(topics=[_topic(i, f"t{i}") for i in range(101, 151)], count=150)
+        client.side_effect = [page1, page2]
+        result = forum.get_forum_topics(client, entity="E", page_limit=100)
+        self.assertEqual(len(result), 150)
+        # второй запрос должен сместиться: offset_topic = id последнего из page1 (100)
+        second_request = client.call_args_list[1].args[0]
+        self.assertEqual(second_request.offset_topic, 100)
+
+    def test_stops_when_page_shorter_than_limit(self):
+        client = MagicMock()
+        client.return_value = _FakeTopics(topics=[_topic(1, "a"), _topic(2, "b")], count=999)
+        result = forum.get_forum_topics(client, entity="E", page_limit=100)
+        # вернулось 2 < 100 → пагинацию прекращаем, не зацикливаемся на count=999
+        self.assertEqual(len(result), 2)
+        self.assertEqual(client.call_count, 1)
+
+
 if __name__ == "__main__":
     unittest.main()
