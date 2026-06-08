@@ -66,7 +66,7 @@ class AuthResult:
         return cls(step=AuthStep.PASSWORD_REQUIRED)
 
     @classmethod
-    def error(cls, msg: str) -> "AuthResult":
+    def failure(cls, msg: str) -> "AuthResult":
         return cls(step=AuthStep.ERROR, error=msg)
 
     @classmethod
@@ -105,14 +105,14 @@ class AuthService:
             if c.is_user_authorized():
                 self._client.save_session()
                 return AuthResult.ok()
-            return AuthResult.error("Требуется вход")
+            return AuthResult.failure("Требуется вход")
         except (AuthKeyInvalidError, AuthKeyUnregisteredError):
-            return AuthResult.error("Сессия устарела. Войдите заново.")
+            return AuthResult.failure("Сессия устарела. Войдите заново.")
         except ApiIdInvalidError:
-            return AuthResult.error("Неверный API ID или API Hash. Проверьте настройки.")
+            return AuthResult.failure("Неверный API ID или API Hash. Проверьте настройки.")
         except Exception as exc:
             logger.error("check_session failed", exc=exc)
-            return AuthResult.error(_friendly(exc))
+            return AuthResult.failure(_friendly(exc))
 
     def send_code(self, phone: str) -> AuthResult:
         """
@@ -121,7 +121,7 @@ class AuthService:
         """
         phone = (phone or "").strip()
         if not phone:
-            return AuthResult.error("Введите номер телефона.")
+            return AuthResult.failure("Введите номер телефона.")
         try:
             c = self._client.ensure_connected()
             if c.is_user_authorized():
@@ -132,20 +132,20 @@ class AuthService:
             self._phone_hash = sent.phone_code_hash
             return AuthResult.code_sent()
         except PhoneNumberInvalidError:
-            return AuthResult.error("Неверный номер телефона.")
+            return AuthResult.failure("Неверный номер телефона.")
         except PhoneNumberBannedError:
-            return AuthResult.error("Этот номер заблокирован в Telegram.")
+            return AuthResult.failure("Этот номер заблокирован в Telegram.")
         except PhoneNumberFloodError:
-            return AuthResult.error("Слишком много попыток. Попробуйте позже.")
+            return AuthResult.failure("Слишком много попыток. Попробуйте позже.")
         except SendCodeUnavailableError:
-            return AuthResult.error("Не удалось отправить код. Попробуйте другой способ.")
+            return AuthResult.failure("Не удалось отправить код. Попробуйте другой способ.")
         except FloodWaitError as exc:
-            return AuthResult.error(f"Слишком много запросов. Подождите {exc.seconds} сек.")
+            return AuthResult.failure(f"Слишком много запросов. Подождите {exc.seconds} сек.")
         except ApiIdInvalidError:
-            return AuthResult.error("Неверный API ID или API Hash. Проверьте настройки.")
+            return AuthResult.failure("Неверный API ID или API Hash. Проверьте настройки.")
         except Exception as exc:
             logger.error("send_code failed", exc=exc)
-            return AuthResult.error(_friendly(exc))
+            return AuthResult.failure(_friendly(exc))
 
     def verify_code(self, code: str, password: str = "") -> AuthResult:
         """
@@ -154,12 +154,12 @@ class AuthService:
         """
         code = (code or "").strip()
         if not code:
-            return AuthResult.error("Введите код из Telegram.")
+            return AuthResult.failure("Введите код из Telegram.")
         if not self._phone_hash:
-            return AuthResult.error("Сначала нажмите «Получить код».")
+            return AuthResult.failure("Сначала нажмите «Получить код».")
         phone = self._phone_number
         if not phone:
-            return AuthResult.error("Введите номер телефона.")
+            return AuthResult.failure("Введите номер телефона.")
         try:
             c = self._client.ensure_connected()
             c.sign_in(phone=phone, code=code, phone_code_hash=self._phone_hash)
@@ -170,32 +170,32 @@ class AuthService:
                 return self.verify_password(password)
             return AuthResult.password_required()
         except PhoneCodeInvalidError:
-            return AuthResult.error("Неверный код. Проверьте и попробуйте снова.")
+            return AuthResult.failure("Неверный код. Проверьте и попробуйте снова.")
         except PhoneCodeExpiredError:
-            return AuthResult.error("Код устарел. Запросите новый код.")
+            return AuthResult.failure("Код устарел. Запросите новый код.")
         except FloodWaitError as exc:
-            return AuthResult.error(f"Слишком много попыток. Подождите {exc.seconds} сек.")
+            return AuthResult.failure(f"Слишком много попыток. Подождите {exc.seconds} сек.")
         except Exception as exc:
             logger.error("verify_code failed", exc=exc)
-            return AuthResult.error(_friendly(exc))
+            return AuthResult.failure(_friendly(exc))
 
     def verify_password(self, password: str) -> AuthResult:
         """Верифицирует пароль двухфакторной аутентификации."""
         password = (password or "").strip()
         if not password:
-            return AuthResult.error("Нужен пароль 2FA.")
+            return AuthResult.failure("Нужен пароль 2FA.")
         try:
             c = self._client.ensure_connected()
             c.sign_in(password=password)
             self._client.save_session()
             return AuthResult.ok()
         except PasswordHashInvalidError:
-            return AuthResult.error("Неверный пароль двухфакторной аутентификации.")
+            return AuthResult.failure("Неверный пароль двухфакторной аутентификации.")
         except FloodWaitError as exc:
-            return AuthResult.error(f"Слишком много попыток. Подождите {exc.seconds} сек.")
+            return AuthResult.failure(f"Слишком много попыток. Подождите {exc.seconds} сек.")
         except Exception as exc:
             logger.error("verify_password failed", exc=exc)
-            return AuthResult.error(_friendly(exc))
+            return AuthResult.failure(_friendly(exc))
 
     def verify_qr_password(self, password: str) -> AuthResult:
         """
@@ -206,7 +206,7 @@ class AuthService:
         """
         password = (password or "").strip()
         if not password:
-            return AuthResult.error("Нужен пароль 2FA.")
+            return AuthResult.failure("Нужен пароль 2FA.")
         try:
             c = self._client.ensure_connected()
             c.sign_in(password=password)
@@ -222,10 +222,10 @@ class AuthService:
             self._qr_pwd_pending = True
             return AuthResult.password_required()
         except FloodWaitError as exc:
-            return AuthResult.error(f"Слишком много попыток. Подождите {exc.seconds} сек.")
+            return AuthResult.failure(f"Слишком много попыток. Подождите {exc.seconds} сек.")
         except Exception as exc:
             logger.error("verify_qr_password failed", exc=exc)
-            return AuthResult.error(_friendly(exc))
+            return AuthResult.failure(_friendly(exc))
 
     # ---- QR-вход ----
 
@@ -317,7 +317,7 @@ class AuthService:
         import datetime
 
         if self._qr is None:
-            return AuthResult.error("QR-вход не запущен.")
+            return AuthResult.failure("QR-вход не запущен.")
         try:
             # QRLogin.wait — async-метод, НЕ синкифицирован telethon.sync
             # (в отличие от TelegramClient). БЕЗ run_until_complete вернётся
@@ -351,7 +351,7 @@ class AuthService:
             # Никто не отсканировал за timeout — нормально, ждём дальше.
             return self._waiting_or_expired()
         except FloodWaitError as exc:
-            return AuthResult.error(f"Слишком много запросов. Подождите {exc.seconds} сек.")
+            return AuthResult.failure(f"Слишком много запросов. Подождите {exc.seconds} сек.")
         except Exception as exc:
             # Диагностика: telethon QRLogin.wait при 2FA может бросать не
             # SessionPasswordNeededError, а TypeError ('Login token response was
@@ -361,7 +361,7 @@ class AuthService:
             logger.error(f"poll_qr exception: {name}: {msg}")
             if "SESSION_PASSWORD_NEEDED" in msg or "password" in msg.lower():
                 return AuthResult.password_required()
-            return AuthResult.error(_friendly(exc))
+            return AuthResult.failure(_friendly(exc))
 
     def _waiting_or_expired(self) -> AuthResult:
         """WAITING, пока токен жив; EXPIRED, когда истёк (по qr.expires)."""
