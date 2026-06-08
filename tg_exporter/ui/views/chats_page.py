@@ -22,7 +22,7 @@ from ..components.button import AppButton
 from ..components.date_range_row import DateRangeRow
 from ..components.entry import AppEntry
 from ..components.tooltip import Tooltip
-from ..modal_utils import make_anchored_popup, resolve_popup_position
+from ..modal_utils import AnchoredPopupController
 from ...core.chat_kind import chat_kind, KIND_LABELS, KIND_ORDER
 from ...utils.dates import parse_local_date
 
@@ -64,9 +64,6 @@ class ChatsPage(ctk.CTkFrame):
         self._kind_vars: dict[str, tk.BooleanVar] = {
             k: tk.BooleanVar(value=True) for k in KIND_ORDER
         }
-        self._kind_popup: Optional[ctk.CTkToplevel] = None
-        self._kind_host: Optional[tk.Misc] = None
-        self._kind_bind_id: Optional[str] = None
         self._build()
 
     # ---- Build ----
@@ -196,6 +193,14 @@ class ChatsPage(ctk.CTkFrame):
             command=self._open_kind_filter, width=92,
         )
         self._kind_btn.pack(side="left", padx=(SPACING["sm"], 0))
+
+        # Popup-фильтр по типу: тот же контроллер, что у календаря, поэтому
+        # бесплатно получает flip-вверх при нехватке места снизу и слежение
+        # за окном-хостом (раньше фильтр за окном не следовал).
+        self._kind_popup = AnchoredPopupController(
+            self._kind_btn, self._build_kind_filter,
+            fg_color=C["card"], follow_host=True,
+        )
 
         # === СТАТУС ===
         self._status_lbl = ctk.CTkLabel(
@@ -394,22 +399,10 @@ class ChatsPage(ctk.CTkFrame):
     # ---- Фильтр по типу чата (popup с галочками) ----
 
     def _open_kind_filter(self) -> None:
-        # Повторный клик по кнопке закрывает уже открытый popup.
-        if self._kind_popup is not None and self._kind_popup.winfo_exists():
-            self._close_kind_popup()
-            return
-        try:
-            anchor_left = self._kind_btn.winfo_rootx()
-            anchor_top = self._kind_btn.winfo_rooty()
-            anchor_bottom = anchor_top + self._kind_btn.winfo_height()
-        except tk.TclError:
-            return
+        # Контроллер сам делает toggle: повторный клик по кнопке закрывает popup.
+        self._kind_popup.open()
 
-        popup = make_anchored_popup(self, anchor_left, anchor_bottom + 4, fg_color=C["card"])
-        try:
-            popup.withdraw()
-        except tk.TclError:
-            pass
+    def _build_kind_filter(self, popup) -> None:
         inner = ctk.CTkFrame(popup, fg_color="transparent")
         inner.pack(padx=SPACING["sm"], pady=SPACING["sm"])
         ctk.CTkLabel(
@@ -421,65 +414,6 @@ class ChatsPage(ctk.CTkFrame):
                 command=self._on_kind_toggle, font=font(13), text_color=C["text"],
                 checkbox_width=18, checkbox_height=18, corner_radius=4,
             ).pack(anchor="w", pady=2)
-
-        try:
-            popup.update_idletasks()
-            px, py = resolve_popup_position(
-                anchor_left, anchor_top, anchor_bottom,
-                popup.winfo_reqwidth(), popup.winfo_reqheight(),
-                self.winfo_screenwidth(), self.winfo_screenheight(),
-            )
-            popup.geometry(f"+{px}+{py}")
-        except tk.TclError:
-            pass
-        try:
-            popup.deiconify()
-        except tk.TclError:
-            pass
-        popup.bind("<Escape>", lambda _e: self._close_kind_popup())
-        popup.after(50, popup.focus_set)
-        self._kind_popup = popup
-
-        try:
-            host = self.winfo_toplevel()
-        except tk.TclError:
-            host = None
-        if host is not None:
-            self._kind_host = host
-            self._kind_bind_id = host.bind("<Button-1>", self._on_kind_outside, add="+")
-
-    def _on_kind_outside(self, event) -> None:
-        if self._kind_popup is None or not self._kind_popup.winfo_exists():
-            return
-        w = event.widget
-        try:
-            if w.winfo_toplevel() is self._kind_popup:
-                return
-        except tk.TclError:
-            return
-        # Клик по самой кнопке — пусть её command сделает toggle.
-        node = w
-        while node is not None:
-            if node is self._kind_btn:
-                return
-            node = getattr(node, "master", None)
-        self._close_kind_popup()
-
-    def _close_kind_popup(self) -> None:
-        if self._kind_host is not None and self._kind_bind_id is not None:
-            try:
-                self._kind_host.unbind("<Button-1>", self._kind_bind_id)
-            except tk.TclError:
-                pass
-        self._kind_host = None
-        self._kind_bind_id = None
-        if self._kind_popup is not None:
-            try:
-                if self._kind_popup.winfo_exists():
-                    self._kind_popup.destroy()
-            except tk.TclError:
-                pass
-            self._kind_popup = None
 
     def _on_kind_toggle(self) -> None:
         enabled = {k for k, v in self._kind_vars.items() if v.get()}

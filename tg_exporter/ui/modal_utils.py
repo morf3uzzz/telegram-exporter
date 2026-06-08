@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import sys
 import tkinter as tk
-from typing import Optional
+from typing import Callable, Optional
 
 import customtkinter as ctk
 
@@ -127,6 +127,20 @@ def make_anchored_popup(parent, x: int, y: int, fg_color=None) -> ctk.CTkTopleve
     return popup
 
 
+def is_descendant(widget, ancestor) -> bool:
+    """True, если widget — это сам ancestor или лежит в его поддереве.
+
+    Идём вверх по цепочке .master. Используется, чтобы отличить клик по
+    кнопке-якорю (или её внутренним подвиджетам CTk) от клика «снаружи»:
+    по якорю popup закрывать не надо — его command сам сделает toggle.
+    """
+    while widget is not None:
+        if widget is ancestor:
+            return True
+        widget = getattr(widget, "master", None)
+    return False
+
+
 def resolve_popup_position(
     anchor_left: int,
     anchor_top: int,
@@ -173,6 +187,198 @@ def resolve_popup_position(
             if y < margin:
                 y = margin
     return int(x), int(y)
+
+
+class AnchoredPopupController:
+    """Жизненный цикл одного «прицельного» popup'а под кнопкой-якорем
+    (дропдаун, календарь и т.п.).
+
+    Инкапсулирует общий для таких popup'ов сценарий:
+      - создать overrideredirect-Toplevel под якорем (make_anchored_popup);
+      - наполнить контентом (callback build_content);
+      - измерить и поставить вниз под якорь либо вверх над ним, если снизу
+        не помещается (resolve_popup_position);
+      - закрыть по <Escape>, по клику вне popup'а и по <Destroy> якоря;
+      - опционально следить за окном-хостом и двигать popup при его
+        перемещении/ресайзе (<Configure>).
+
+    Один контроллер обслуживает один popup за раз. Повторный open() при уже
+    открытом popup'е его закрывает — это удобно вешать прямо на command
+    кнопки-якоря: клик по кнопке = toggle.
+
+    build_content получает готовый (но ещё скрытый) Toplevel и наполняет его;
+    кнопки «Закрыть»/выбора значения внутри контента зовут close().
+    """
+
+    def __init__(
+        self,
+        anchor: tk.Misc,
+        build_content: Callable[[ctk.CTkToplevel], None],
+        *,
+        fg_color=None,
+        follow_host: bool = True,
+        gap: int = 4,
+    ) -> None:
+        self._anchor = anchor
+        self._build_content = build_content
+        self._fg_color = fg_color
+        self._follow_host = follow_host
+        self._gap = gap
+
+        self._popup: Optional[ctk.CTkToplevel] = None
+        self._host: Optional[tk.Misc] = None
+        self._outside_bind_id: Optional[str] = None
+        self._follow_bind_id: Optional[str] = None
+
+        # Если якорь уничтожают, пока popup открыт — иначе popup останется
+        # висеть отдельным окном.
+        anchor.bind("<Destroy>", self._on_anchor_destroy, add="+")
+
+    # ---- Public API ----
+
+    @property
+    def popup(self) -> Optional[ctk.CTkToplevel]:
+        return self._popup
+
+    def is_open(self) -> bool:
+        return self._popup is not None and self._popup.winfo_exists()
+
+    def open(self) -> None:
+        """Открыть popup. Если уже открыт — закрыть (toggle)."""
+        if self.is_open():
+            self.close()
+            return
+
+        try:
+            anchor_left = self._anchor.winfo_rootx()
+            anchor_top = self._anchor.winfo_rooty()
+            anchor_bottom = anchor_top + self._anchor.winfo_height()
+        except tk.TclError:
+            return
+
+        # Создаём, прячем, наполняем — чтобы popup не мелькнул в промежуточной
+        # позиции до измерения.
+        popup = make_anchored_popup(
+            self._anchor, anchor_left, anchor_bottom + self._gap,
+            fg_color=self._fg_color,
+        )
+        try:
+            popup.withdraw()
+        except tk.TclError:
+            pass
+
+        self._build_content(popup)
+
+        # Финальная позиция по фактическому размеру popup и размеру экрана.
+        try:
+            popup.update_idletasks()
+            px, py = resolve_popup_position(
+                anchor_left, anchor_top, anchor_bottom,
+                popup.winfo_reqwidth(), popup.winfo_reqheight(),
+                self._anchor.winfo_screenwidth(),
+                self._anchor.winfo_screenheight(),
+            )
+            popup.geometry(f"+{px}+{py}")
+        except tk.TclError:
+            pass
+        try:
+            popup.deiconify()
+        except tk.TclError:
+            pass
+
+        popup.bind("<Escape>", lambda _e: self.close())
+        popup.after(50, popup.focus_set)
+        self._popup = popup
+
+        # Закрытие по клику вне popup'а биндим на Toplevel, в котором живёт
+        # якорь (модалка/главное окно): popup — отдельный Toplevel, его клики
+        # сюда не приходят, поэтому внутри него можно спокойно тыкать по
+        # содержимому.
+        try:
+            host = self._anchor.winfo_toplevel()
+        except tk.TclError:
+            host = None
+        if host is not None:
+            self._host = host
+            self._outside_bind_id = host.bind(
+                "<Button-1>", self._on_outside_click, add="+",
+            )
+            # Popup — отдельное окно с абсолютными координатами, само за окном
+            # не следует. Двигаем его за якорем при перемещении/ресайзе хоста.
+            if self._follow_host:
+                self._follow_bind_id = host.bind(
+                    "<Configure>", self._on_host_configure, add="+",
+                )
+
+    def close(self) -> None:
+        if self._host is not None:
+            if self._outside_bind_id is not None:
+                try:
+                    self._host.unbind("<Button-1>", self._outside_bind_id)
+                except tk.TclError:
+                    pass
+            if self._follow_bind_id is not None:
+                try:
+                    self._host.unbind("<Configure>", self._follow_bind_id)
+                except tk.TclError:
+                    pass
+        self._host = None
+        self._outside_bind_id = None
+        self._follow_bind_id = None
+        if self._popup is not None:
+            try:
+                if self._popup.winfo_exists():
+                    self._popup.destroy()
+            except tk.TclError:
+                pass
+            self._popup = None
+
+    # ---- Internal ----
+
+    def _on_anchor_destroy(self, _event=None) -> None:
+        self.close()
+
+    def _on_outside_click(self, event) -> None:
+        if not self.is_open():
+            return
+        w = event.widget
+        try:
+            toplevel = w.winfo_toplevel()
+        except tk.TclError:
+            return
+        # Клик внутри самого popup'а — игнор (обычно сюда не доходит: popup —
+        # отдельный Toplevel).
+        if toplevel is self._popup:
+            return
+        # Клик по якорю (или его внутренним подвиджетам CTk) — пусть сработает
+        # его command и сам сделает toggle. Иначе будет close+reopen.
+        if is_descendant(w, self._anchor):
+            return
+        self.close()
+
+    def _on_host_configure(self, event=None) -> None:
+        """Двигает открытый popup за якорем при сдвиге/ресайзе окна-хоста."""
+        if not self.is_open():
+            return
+        # Только <Configure> самого окна-хоста, не его детей: bindtags Tk
+        # прокидывают событие на родителя, иначе — шквал лишних вызовов.
+        if event is not None and self._host is not None:
+            if str(event.widget) != str(self._host):
+                return
+        try:
+            anchor_left = self._anchor.winfo_rootx()
+            anchor_top = self._anchor.winfo_rooty()
+            anchor_bottom = anchor_top + self._anchor.winfo_height()
+            pw = max(self._popup.winfo_width(), self._popup.winfo_reqwidth())
+            ph = max(self._popup.winfo_height(), self._popup.winfo_reqheight())
+            px, py = resolve_popup_position(
+                anchor_left, anchor_top, anchor_bottom, pw, ph,
+                self._anchor.winfo_screenwidth(),
+                self._anchor.winfo_screenheight(),
+            )
+            self._popup.geometry(f"+{px}+{py}")
+        except tk.TclError:
+            pass
 
 
 def setup_smooth_scroll(modal, scrollable_frame) -> None:

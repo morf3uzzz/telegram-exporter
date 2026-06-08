@@ -16,7 +16,7 @@ import customtkinter as ctk
 from typing import Callable, Optional
 
 from .button import AppButton
-from ..modal_utils import make_anchored_popup, resolve_popup_position
+from ..modal_utils import AnchoredPopupController
 from ..theme import C, RADIUS, SPACING, font
 
 
@@ -59,22 +59,21 @@ class DatePickerButton(AppButton):
         )
         self._target = target_var
         self._on_pick = on_pick
-        self._popup: Optional[ctk.CTkToplevel] = None
-        self._outside_host: Optional[tk.Misc] = None
-        self._outside_bind_id: Optional[str] = None
-        self._follow_bind_id: Optional[str] = None
-        # Если кнопку уничтожают, пока popup открыт — popup останется висеть
-        # отдельным окном.
-        self.bind("<Destroy>", lambda _e: self._close_popup(), add="+")
+        # Общий контроллер popup'а: создание/позиционирование (с flip-вверх),
+        # закрытие по Escape, клику вне и <Destroy> кнопки, слежение за
+        # окном-хостом (двигает календарь при перемещении/ресайзе окна).
+        self._date_popup = AnchoredPopupController(
+            self, self._build_calendar, fg_color=C["card"], follow_host=True,
+        )
 
     # ---- Internal ----
 
     def _open_picker(self) -> None:
-        # Toggle: повторный клик по иконке закрывает уже открытый popup.
-        if self._popup is not None and self._popup.winfo_exists():
-            self._close_popup()
-            return
+        # Контроллер сам делает toggle: повторный клик по иконке закрывает
+        # уже открытый popup.
+        self._date_popup.open()
 
+    def _build_calendar(self, popup) -> None:
         initial = datetime.date.today()
         raw = (self._target.get() or "").strip()
         if raw:
@@ -82,147 +81,19 @@ class DatePickerButton(AppButton):
                 initial = datetime.date.fromisoformat(raw[:10])
             except ValueError:
                 pass
-
-        try:
-            anchor_left = self.winfo_rootx()
-            anchor_top = self.winfo_rooty()
-            anchor_bottom = anchor_top + self.winfo_height()
-        except tk.TclError:
-            return
-
-        # Создаём popup, наполняем, затем меряем и решаем — вниз под иконкой
-        # или вверх над ней (если снизу не помещается). До измерения прячем,
-        # чтобы не мелькнул в промежуточной позиции.
-        popup = make_anchored_popup(
-            self, anchor_left, anchor_bottom + 4, fg_color=C["card"],
-        )
-        try:
-            popup.withdraw()
-        except tk.TclError:
-            pass
         _CalendarFrame(popup, initial=initial, on_pick=self._commit).pack(
             padx=SPACING["sm"], pady=(SPACING["sm"], SPACING["xs"]),
         )
         AppButton(
             popup, text="Закрыть", variant="ghost", size="sm",
-            command=self._close_popup,
+            command=self._date_popup.close,
         ).pack(padx=SPACING["sm"], pady=(0, SPACING["sm"]), fill="x")
-
-        # Финальная позиция по фактическому размеру popup и размеру экрана.
-        try:
-            popup.update_idletasks()
-            px, py = resolve_popup_position(
-                anchor_left, anchor_top, anchor_bottom,
-                popup.winfo_reqwidth(), popup.winfo_reqheight(),
-                self.winfo_screenwidth(), self.winfo_screenheight(),
-            )
-            popup.geometry(f"+{px}+{py}")
-        except tk.TclError:
-            pass
-        try:
-            popup.deiconify()
-        except tk.TclError:
-            pass
-
-        popup.bind("<Escape>", lambda _e: self._close_popup())
-        popup.after(50, popup.focus_set)
-        self._popup = popup
-
-        # Закрытие по клику вне popup'а. Биндим на тот Toplevel, в котором
-        # живёт сама иконка (модалка экспорта или главное окно). Сам popup —
-        # отдельный Toplevel, его клики сюда не приходят, поэтому внутри
-        # него можно спокойно тыкать по дням и стрелкам.
-        try:
-            host = self.winfo_toplevel()
-        except tk.TclError:
-            host = None
-        if host is not None:
-            self._outside_host = host
-            self._outside_bind_id = host.bind(
-                "<Button-1>", self._on_outside_click, add="+",
-            )
-            # Popup — отдельное окно с абсолютными координатами, само за окном
-            # не следует. Двигаем его за пикером при перемещении/ресайзе хоста.
-            self._follow_bind_id = host.bind(
-                "<Configure>", self._follow_host, add="+",
-            )
-
-    def _on_outside_click(self, event) -> None:
-        if self._popup is None or not self._popup.winfo_exists():
-            return
-        w = event.widget
-        try:
-            toplevel = w.winfo_toplevel()
-        except tk.TclError:
-            return
-        # Клик внутри popup'а — игнор (на всякий случай, обычно сюда не доходит).
-        if toplevel is self._popup:
-            return
-        # Клик по самой иконке (или её внутренним подвиджетам CTk) — пусть
-        # сработает её command и сам сделает toggle. Иначе будет close+reopen.
-        if self._is_descendant(w, self):
-            return
-        self._close_popup()
-
-    @staticmethod
-    def _is_descendant(widget, ancestor) -> bool:
-        while widget is not None:
-            if widget is ancestor:
-                return True
-            widget = getattr(widget, "master", None)
-        return False
-
-    def _follow_host(self, event=None) -> None:
-        """Двигает открытый popup за пикером при сдвиге/ресайзе окна-хоста."""
-        if self._popup is None or not self._popup.winfo_exists():
-            return
-        # Только Configure самого окна-хоста, не его детей: bindtags Tk
-        # прокидывают событие на родителя, иначе — шквал лишних вызовов.
-        if event is not None and self._outside_host is not None:
-            if str(event.widget) != str(self._outside_host):
-                return
-        try:
-            anchor_left = self.winfo_rootx()
-            anchor_top = self.winfo_rooty()
-            anchor_bottom = anchor_top + self.winfo_height()
-            pw = max(self._popup.winfo_width(), self._popup.winfo_reqwidth())
-            ph = max(self._popup.winfo_height(), self._popup.winfo_reqheight())
-            px, py = resolve_popup_position(
-                anchor_left, anchor_top, anchor_bottom, pw, ph,
-                self.winfo_screenwidth(), self.winfo_screenheight(),
-            )
-            self._popup.geometry(f"+{px}+{py}")
-        except tk.TclError:
-            pass
 
     def _commit(self, value: str) -> None:
         self._target.set(value)
         if self._on_pick is not None:
             self._on_pick()
-        self._close_popup()
-
-    def _close_popup(self) -> None:
-        if self._outside_host is not None:
-            if self._outside_bind_id is not None:
-                try:
-                    self._outside_host.unbind("<Button-1>", self._outside_bind_id)
-                except tk.TclError:
-                    pass
-            if self._follow_bind_id is not None:
-                try:
-                    self._outside_host.unbind("<Configure>", self._follow_bind_id)
-                except tk.TclError:
-                    pass
-        self._outside_host = None
-        self._outside_bind_id = None
-        self._follow_bind_id = None
-        if self._popup is not None:
-            try:
-                if self._popup.winfo_exists():
-                    self._popup.destroy()
-            except tk.TclError:
-                pass
-            self._popup = None
+        self._date_popup.close()
 
 
 class _CalendarFrame(ctk.CTkFrame):
