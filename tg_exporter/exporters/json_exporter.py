@@ -8,7 +8,6 @@ JsonExporter — потоковая запись сообщений в JSON.
 from __future__ import annotations
 
 import json
-import os
 from typing import Optional, IO
 
 from .base import BaseExporter

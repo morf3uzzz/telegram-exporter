@@ -381,7 +381,6 @@ class AddAccountModal(ctk.CTkToplevel):
         (wait — async, не синкифицирован telethon.sync).
         """
         import asyncio
-        import datetime
         from telethon.errors import SessionPasswordNeededError, AuthRestartError
 
         client = self._client
@@ -414,7 +413,6 @@ class AddAccountModal(ctk.CTkToplevel):
                     return
                 continue
             except Exception as exc:
-                name = type(exc).__name__
                 msg = str(exc)
                 if "SESSION_PASSWORD_NEEDED" in msg or "password" in msg.lower():
                     self._qr_active = False

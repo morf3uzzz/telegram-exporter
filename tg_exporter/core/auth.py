@@ -314,7 +314,6 @@ class AuthService:
           ERROR             — старт не выполнен / иная ошибка.
         """
         import asyncio
-        import datetime
 
         if self._qr is None:
             return AuthResult.failure("QR-вход не запущен.")

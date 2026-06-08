@@ -175,9 +175,11 @@ def _encode_data(data: bytes, version: int) -> List[int]:
     blocks = []
     idx = 0
     for _ in range(n1):
-        blocks.append(data_cw[idx:idx + d1]); idx += d1
+        blocks.append(data_cw[idx:idx + d1])
+        idx += d1
     for _ in range(n2):
-        blocks.append(data_cw[idx:idx + d2]); idx += d2
+        blocks.append(data_cw[idx:idx + d2])
+        idx += d2
 
     ec_blocks = [_rs_encode(b, ec_per_block) for b in blocks]
 
@@ -242,9 +244,11 @@ def _place_timing(m, reserved) -> None:
     for i in range(8, n - 8):
         v = (i % 2 == 0)
         if not reserved[6][i]:
-            m[6][i] = v; reserved[6][i] = True
+            m[6][i] = v
+            reserved[6][i] = True
         if not reserved[i][6]:
-            m[i][6] = v; reserved[i][6] = True
+            m[i][6] = v
+            reserved[i][6] = True
 
 
 def _reserve_format(reserved, n) -> None:

@@ -10,7 +10,6 @@ MarkdownExporter — запись сообщений в Markdown с разбив
 
 from __future__ import annotations
 
-import os
 import re
 import datetime
 from typing import Optional
@@ -202,8 +201,8 @@ def _format_message(msg: ExportMessage, s: MarkdownSettings) -> str:
             else:
                 link_lines.append(link.url)
         if link_lines:
-            has_text_links = any(l.text for l in msg.links)
-            all_in_body = all(l.url in body for l in msg.links if not l.text)
+            has_text_links = any(lnk.text for lnk in msg.links)
+            all_in_body = all(lnk.url in body for lnk in msg.links if not lnk.text)
             if has_text_links or not all_in_body:
                 extras.append("🔗 " + " | ".join(link_lines))
 

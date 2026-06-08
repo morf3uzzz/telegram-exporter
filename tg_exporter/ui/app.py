@@ -486,7 +486,8 @@ class App(ctk.CTk):
 
     def start_topics_export(self, dialog, output_path: str, modal, topics) -> None:
         """Запускает последовательный экспорт выбранных топиков форума."""
-        import datetime, os
+        import datetime
+        import os
         from ..exporters.base import sanitize_filename
 
         if not topics:
@@ -1158,7 +1159,8 @@ class App(ctk.CTk):
             self._active_export_modal.on_model_download_progress(ratio, text)
 
     def _on_export_done(self, payload) -> None:
-        import os, shutil
+        import os
+        import shutil
         export_dir, files = payload
         # Топик-пакет: ведём к следующему топику, финал покажет topic_done.
         if self._topic_active:
@@ -1213,8 +1215,9 @@ class App(ctk.CTk):
         self.chats_page.set_status(f"Папка: {current}/{total} — {label}")
 
     def _on_folder_done(self, total: int) -> None:
-        import os, glob as _glob
-        ok = sum(1 for l in self._folder_log if l.startswith("OK"))
+        import os
+        import glob as _glob
+        ok = sum(1 for line in self._folder_log if line.startswith("OK"))
         err = total - ok
 
         if self._folder_mode == "Один .md на папку" and self._folder_export_base:

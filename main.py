@@ -9,7 +9,6 @@ main.py — точка входа нового приложения.
 
 import sys
 import traceback
-from pathlib import Path
 
 
 # Python 3.13+ для Tkinter по умолчанию включает Per-Monitor V2 DPI awareness

@@ -7,9 +7,9 @@
 
 from __future__ import annotations
 
-from typing import Optional, TYPE_CHECKING
+from typing import Optional
 
-from telethon.utils import get_display_name, get_peer_id
+from telethon.utils import get_display_name
 
 from ..models.message import (
     ExportMessage,
