@@ -36,6 +36,8 @@ from ..core.client import TelegramClientManager
 from ..core.auth import AuthService, AuthStep, QrNeedsPassword
 from ..core.orchestrator import ExportOrchestrator
 from ..core.profiles import ProfileManager, Profile
+from ..core import forum
+from ..core.export_queue import ExportQueue, build_topic_jobs
 from ..services.export_history import ExportHistory
 from ..utils.cancellation import CancellationToken
 from ..utils.dates import resolve_period_to_range
@@ -108,6 +110,12 @@ class App(ctk.CTk):
         # Период из шапки фиксируется в момент запуска экспорта папки, чтобы
         # все чаты пакета выгружались с одинаковым диапазоном дат.
         self._folder_dates: tuple[Optional[datetime.datetime], Optional[datetime.datetime]] = (None, None)
+
+        # Состояние пакетного экспорта топиков форума (аналог folder, но изолирован).
+        self._topic_queue: Optional[ExportQueue] = None
+        self._topic_active: bool = False
+        self._topic_base: Optional[str] = None
+        self._topic_options: Optional[dict] = None
 
         # Views / Shell
         self._container = ctk.CTkFrame(self, fg_color="transparent")
@@ -283,6 +291,19 @@ class App(ctk.CTk):
     def show_export_dialog(self, dialog) -> None:
         modal = ExportModal(self, dialog)
         self._active_export_modal = modal
+
+    def load_forum_topics(self, dialog, modal) -> None:
+        """Грузит список топиков форума в фоне для модалки экспорта."""
+        self._worker.submit(self._bg_load_topics, dialog, modal)
+
+    def _bg_load_topics(self, dialog, modal) -> None:
+        try:
+            c = self._client_mgr.ensure_connected()
+            topics = forum.get_forum_topics(c, dialog.entity)
+            self._worker.put_event("topics_loaded", (modal, topics))
+        except Exception as exc:
+            logger.error("load_forum_topics failed", exc=exc)
+            self._worker.put_event("topics_load_failed", (modal, str(exc)))
 
     # ---- Auth actions ----
 
@@ -855,6 +876,11 @@ class App(ctk.CTk):
         d.on("add_account_qr_error",   self._on_add_account_qr_error)
         d.on("proxy_test_result",     self._on_proxy_test_result)
 
+        d.on("topics_loaded",      self._on_topics_loaded)
+        d.on("topics_load_failed", self._on_topics_load_failed)
+        d.on("topic_progress",     self._on_topic_progress)
+        d.on("topic_done",         self._on_topic_done)
+
         d.on("chats_loaded",     self._on_chats_loaded)
         d.on("chats_load_failed", self._on_chats_load_failed)
         d.on("folders_loaded",   lambda names: self.chats_page.set_folders(names))
@@ -946,6 +972,30 @@ class App(ctk.CTk):
             modal.on_test_result(ok, message)
         except Exception:
             pass
+
+    def _on_topics_loaded(self, payload) -> None:
+        modal, topics = payload
+        try:
+            modal.set_topics(topics)
+        except Exception:
+            pass
+
+    def _on_topics_load_failed(self, payload) -> None:
+        modal, message = payload
+        try:
+            modal.set_topics_error(message or "Не удалось загрузить топики")
+        except Exception:
+            pass
+
+    def _on_topic_progress(self, payload) -> None:
+        current, total, title = payload
+        if self._active_export_modal:
+            self._active_export_modal.on_topic_progress(current, total, title)
+
+    def _on_topic_done(self, payload) -> None:
+        export_dir, ok, failed = payload
+        if self._active_export_modal:
+            self._active_export_modal.on_topic_batch_done(export_dir, ok, failed)
 
     def _on_profile_switched(self, profile: Profile) -> None:
         # Обновляем список чатов под новый аккаунт + карточки аккаунтов
