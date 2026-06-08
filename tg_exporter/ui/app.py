@@ -1098,6 +1098,11 @@ class App(ctk.CTk):
         mb.showinfo("Информация", msg)
 
     def _on_export_start(self, payload) -> None:
+        # В топик-пакете лейбл «Топик N/total: …» ставит _on_topic_progress —
+        # не даём per-topic export_start затереть общий счётчик. Прогресс-бар
+        # дальше наполняется через export_progress (он несёт count/total).
+        if self._topic_active:
+            return
         chat_name, total = payload
         if self._active_export_modal:
             self._active_export_modal.on_export_start(chat_name, total)

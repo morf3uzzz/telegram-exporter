@@ -8,12 +8,9 @@ GetForumTopicsRequest. Downstream работает с моделью ForumTopic.
 
 from __future__ import annotations
 
-from typing import Optional
-
 from telethon import functions
 
 from ..models.forum_topic import ForumTopic
-from ..utils.logger import logger
 
 
 def is_forum(entity) -> bool:
