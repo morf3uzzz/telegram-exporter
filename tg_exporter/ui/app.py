@@ -467,9 +467,73 @@ class App(ctk.CTk):
             lambda etype, payload: self._worker.put_event(etype, payload),
         )
 
+    def start_topics_export(self, dialog, output_path: str, modal, topics) -> None:
+        """Запускает последовательный экспорт выбранных топиков форума."""
+        import datetime, os
+        from ..exporters.base import sanitize_filename
+
+        if not topics:
+            self._worker.put_event("error", "Не выбран ни один топик.")
+            return
+
+        ts = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        base = os.path.join(output_path, f"{sanitize_filename(dialog.name or 'forum')}_{ts}")
+        os.makedirs(base, exist_ok=True)
+
+        self._topic_queue = ExportQueue(build_topic_jobs(dialog, topics))
+        self._topic_active = True
+        self._topic_base = base
+        self._topic_options = modal.get_export_options()
+        self._active_export_modal = modal
+        self._export_next_topic()
+
+    def _export_next_topic(self) -> None:
+        q = self._topic_queue
+        if not self._topic_active or q is None or not q.has_next():
+            if q is not None:
+                self._worker.put_event("topic_done", (self._topic_base, q.ok, q.failed))
+            self._topic_active = False
+            self._topic_queue = None
+            return
+
+        job = q.next()
+        self._worker.put_event("topic_progress", (q.current_index, q.total, job.topic_title))
+
+        opts = self._topic_options or {}
+        self._token = CancellationToken()
+        task = ExportTask(
+            chat_id=getattr(job.dialog, "id", 0),
+            chat_name=job.dialog.name or "Chat",
+            output_path=self._topic_base,
+            format=opts.get("format", ExportFormat.BOTH),
+            date_from=opts.get("date_from"),
+            date_to=opts.get("date_to"),
+            topic_id=job.topic_id,
+            topic_title=job.topic_title,
+            download_media=opts.get("download_media", False),
+            collect_analytics=opts.get("collect_analytics", False),
+            transcribe_audio=opts.get("transcribe_audio", False),
+            transcription_provider=self.config.transcription_provider,
+            transcription_language=self.config.transcription_language,
+            local_whisper_model=self.config.local_whisper_model,
+            deepgram_api_key=self.credentials.load_deepgram_key() or "",
+            author_filter=AuthorFilter(),
+            words_per_file=opts.get("words_per_file", 50_000),
+        )
+        progress = ExportProgress()
+        deepgram_key = self.credentials.load_deepgram_key()
+        orch = ExportOrchestrator(self._client_mgr, self.config, self._history, deepgram_key)
+        token = self._token
+        self._worker.submit(
+            orch.run, job.dialog, task, token, progress,
+            lambda etype, payload: self._worker.put_event(etype, payload),
+        )
+
     def cancel_export(self) -> None:
         self._token.cancel()
         self._folder_active = False
+        self._topic_active = False
+        self._topic_queue = None
 
     def export_current_folder(self, mode: str = "По чатам", transcribe: bool = False) -> None:
         folder = self._current_folder
@@ -1055,6 +1119,11 @@ class App(ctk.CTk):
     def _on_export_done(self, payload) -> None:
         import os, shutil
         export_dir, files = payload
+        # Топик-пакет: ведём к следующему топику, финал покажет topic_done.
+        if self._topic_active:
+            self._topic_queue.record(True)
+            self._export_next_topic()
+            return
         if self._active_export_modal:
             self._active_export_modal.on_export_done(export_dir, files)
         if self._folder_active:
@@ -1081,6 +1150,10 @@ class App(ctk.CTk):
             self._export_next_in_folder()
 
     def _on_export_error(self, msg: str) -> None:
+        if self._topic_active:
+            self._topic_queue.record(False)
+            self._export_next_topic()
+            return
         if self._active_export_modal:
             self._active_export_modal.on_export_error(msg)
         if self._folder_active:
@@ -1091,6 +1164,8 @@ class App(ctk.CTk):
         if self._active_export_modal:
             self._active_export_modal.on_export_cancelled()
         self._folder_active = False
+        self._topic_active = False
+        self._topic_queue = None
 
     def _on_folder_progress(self, payload) -> None:
         current, total, label = payload
