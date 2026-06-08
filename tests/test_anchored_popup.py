@@ -187,6 +187,8 @@ class TestAnchoredPopupController(unittest.TestCase):
         seqs = {s for s, _fn, _add in host.binds}
         self.assertIn("<Button-1>", seqs)
         self.assertIn("<Configure>", seqs)               # follow_host=True
+        self.assertIn("<MouseWheel>", seqs)              # закрытие при скролле
+        self.assertIn("<Deactivate>", seqs)              # закрытие при alt-tab
 
     def test_open_when_open_toggles_closed(self):
         ctl, anchor, host, popup = self._make()
@@ -246,22 +248,47 @@ class TestAnchoredPopupController(unittest.TestCase):
         _handler(host, "<Configure>")(_Event(child))
         self.assertEqual(len(popup.geometries), before)
 
+    # ---- scroll / app-deactivate ----
+
+    def test_scroll_closes(self):
+        # Прокрутка контента под popup'ом: якорь уезжает -> закрываемся,
+        # а не висим «отклеенными».
+        ctl, anchor, host, popup = self._make()
+        _handler(host, "<MouseWheel>")(_Event(_FakeWidget("scrolled")))
+        self.assertFalse(ctl.is_open())
+        self.assertTrue(popup.destroyed)
+
+    def test_deactivate_closes(self):
+        # Приложение ушло на задний план (alt-tab): topmost-popup иначе висит
+        # поверх чужого окна.
+        ctl, anchor, host, popup = self._make()
+        _handler(host, "<Deactivate>")(_Event(host))
+        self.assertFalse(ctl.is_open())
+        self.assertTrue(popup.destroyed)
+
+    def test_deactivate_of_child_ignored(self):
+        ctl, anchor, host, popup = self._make()
+        _handler(host, "<Deactivate>")(_Event(_FakeWidget("child")))
+        self.assertTrue(ctl.is_open())
+
     # ---- close ----
 
     def test_close_unbinds_everything(self):
         ctl, anchor, host, popup = self._make()
         ctl.close()
         unbound = {s for s, _id in host.unbinds}
-        self.assertEqual(unbound, {"<Button-1>", "<Configure>"})
+        self.assertEqual(unbound, {"<Button-1>", "<Configure>", "<MouseWheel>",
+                                   "<Button-4>", "<Button-5>", "<Deactivate>"})
         self.assertTrue(popup.destroyed)
         self.assertFalse(ctl.is_open())
         self.assertIsNone(ctl.popup)
 
-    def test_close_followhost_false_unbinds_only_button(self):
+    def test_close_followhost_false_unbinds_all_but_configure(self):
         ctl, anchor, host, popup = self._make(follow_host=False)
         ctl.close()
         unbound = {s for s, _id in host.unbinds}
-        self.assertEqual(unbound, {"<Button-1>"})
+        self.assertEqual(unbound, {"<Button-1>", "<MouseWheel>",
+                                   "<Button-4>", "<Button-5>", "<Deactivate>"})
 
     def test_close_is_idempotent(self):
         ctl, anchor, host, popup = self._make()

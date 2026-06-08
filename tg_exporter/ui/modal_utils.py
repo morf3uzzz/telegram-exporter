@@ -198,7 +198,8 @@ class AnchoredPopupController:
       - наполнить контентом (callback build_content);
       - измерить и поставить вниз под якорь либо вверх над ним, если снизу
         не помещается (resolve_popup_position);
-      - закрыть по <Escape>, по клику вне popup'а и по <Destroy> якоря;
+      - закрыть по <Escape>, клику вне popup'а, <Destroy> якоря, прокрутке
+        контента (<MouseWheel>) и уходе приложения на задний план (<Deactivate>);
       - опционально следить за окном-хостом и двигать popup при его
         перемещении/ресайзе (<Configure>).
 
@@ -227,8 +228,7 @@ class AnchoredPopupController:
 
         self._popup: Optional[ctk.CTkToplevel] = None
         self._host: Optional[tk.Misc] = None
-        self._outside_bind_id: Optional[str] = None
-        self._follow_bind_id: Optional[str] = None
+        self._host_binds: list[tuple[str, str]] = []   # (sequence, funcid)
 
         # Если якорь уничтожают, пока popup открыт — иначе popup останется
         # висеть отдельным окном.
@@ -300,31 +300,32 @@ class AnchoredPopupController:
             host = None
         if host is not None:
             self._host = host
-            self._outside_bind_id = host.bind(
-                "<Button-1>", self._on_outside_click, add="+",
-            )
+            self._bind_host("<Button-1>", self._on_outside_click)
             # Popup — отдельное окно с абсолютными координатами, само за окном
             # не следует. Двигаем его за якорем при перемещении/ресайзе хоста.
             if self._follow_host:
-                self._follow_bind_id = host.bind(
-                    "<Configure>", self._on_host_configure, add="+",
-                )
+                self._bind_host("<Configure>", self._on_host_configure)
+            # Контент под popup'ом прокрутили — якорь уехал. Точно следовать за
+            # скроллом внутри CTkScrollableFrame ненадёжно, поэтому закрываемся.
+            for seq in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+                self._bind_host(seq, self._on_scroll)
+            # Приложение ушло на задний план (alt-tab/клик в другое окно):
+            # topmost overrideredirect-popup иначе висит поверх чужого окна.
+            self._bind_host("<Deactivate>", self._on_deactivate)
+
+    def _bind_host(self, sequence: str, callback) -> None:
+        funcid = self._host.bind(sequence, callback, add="+")
+        self._host_binds.append((sequence, funcid))
 
     def close(self) -> None:
         if self._host is not None:
-            if self._outside_bind_id is not None:
+            for sequence, funcid in self._host_binds:
                 try:
-                    self._host.unbind("<Button-1>", self._outside_bind_id)
-                except tk.TclError:
-                    pass
-            if self._follow_bind_id is not None:
-                try:
-                    self._host.unbind("<Configure>", self._follow_bind_id)
+                    self._host.unbind(sequence, funcid)
                 except tk.TclError:
                     pass
         self._host = None
-        self._outside_bind_id = None
-        self._follow_bind_id = None
+        self._host_binds = []
         if self._popup is not None:
             try:
                 if self._popup.winfo_exists():
@@ -379,6 +380,21 @@ class AnchoredPopupController:
             self._popup.geometry(f"+{px}+{py}")
         except tk.TclError:
             pass
+
+    def _on_scroll(self, _event=None) -> None:
+        # Контент под popup'ом прокрутили: якорь уехал — закрываемся, иначе
+        # popup «отклеивается» и висит на старом месте.
+        if self.is_open():
+            self.close()
+
+    def _on_deactivate(self, event=None) -> None:
+        # Приложение потеряло передний план (alt-tab): topmost-popup иначе
+        # остаётся висеть поверх другого окна.
+        if event is not None and self._host is not None:
+            if str(event.widget) != str(self._host):
+                return
+        if self.is_open():
+            self.close()
 
 
 def setup_smooth_scroll(modal, scrollable_frame) -> None:
