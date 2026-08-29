@@ -18,7 +18,7 @@ import webbrowser
 from typing import TYPE_CHECKING
 import customtkinter as ctk
 
-from ..theme import C, RADIUS, SPACING, WIDGET, font, font_display
+from ..theme import C, RADIUS, SPACING, font, font_display
 from ..components.button import AppButton
 from ..components.entry import AppEntry
 from ..components.qr_widget import QRCodeWidget

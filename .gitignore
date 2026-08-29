@@ -12,6 +12,9 @@ build/
 dist/
 tmp_artifacts/
 icons/app.iconset/
+icons/app.ico
+*.spec
+*.log
 
 # Local sessions (runtime, в домашней директории)
 telegram_session.session

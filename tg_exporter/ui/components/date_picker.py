@@ -16,7 +16,7 @@ import customtkinter as ctk
 from typing import Callable, Optional
 
 from .button import AppButton
-from ..modal_utils import make_anchored_popup
+from ..modal_utils import AnchoredPopupController
 from ..theme import C, RADIUS, SPACING, font
 
 
@@ -59,21 +59,21 @@ class DatePickerButton(AppButton):
         )
         self._target = target_var
         self._on_pick = on_pick
-        self._popup: Optional[ctk.CTkToplevel] = None
-        self._outside_host: Optional[tk.Misc] = None
-        self._outside_bind_id: Optional[str] = None
-        # Если кнопку уничтожают, пока popup открыт — popup останется висеть
-        # отдельным окном.
-        self.bind("<Destroy>", lambda _e: self._close_popup(), add="+")
+        # Общий контроллер popup'а: создание/позиционирование (с flip-вверх),
+        # закрытие по Escape, клику вне и <Destroy> кнопки, слежение за
+        # окном-хостом (двигает календарь при перемещении/ресайзе окна).
+        self._date_popup = AnchoredPopupController(
+            self, self._build_calendar, fg_color=C["card"], follow_host=True,
+        )
 
     # ---- Internal ----
 
     def _open_picker(self) -> None:
-        # Toggle: повторный клик по иконке закрывает уже открытый popup.
-        if self._popup is not None and self._popup.winfo_exists():
-            self._close_popup()
-            return
+        # Контроллер сам делает toggle: повторный клик по иконке закрывает
+        # уже открытый popup.
+        self._date_popup.open()
 
+    def _build_calendar(self, popup) -> None:
         initial = datetime.date.today()
         raw = (self._target.get() or "").strip()
         if raw:
@@ -81,85 +81,19 @@ class DatePickerButton(AppButton):
                 initial = datetime.date.fromisoformat(raw[:10])
             except ValueError:
                 pass
-
-        try:
-            x = self.winfo_rootx()
-            y = self.winfo_rooty() + self.winfo_height() + 4
-        except tk.TclError:
-            return
-
-        popup = make_anchored_popup(self, x, y, fg_color=C["card"])
         _CalendarFrame(popup, initial=initial, on_pick=self._commit).pack(
             padx=SPACING["sm"], pady=(SPACING["sm"], SPACING["xs"]),
         )
         AppButton(
             popup, text="Закрыть", variant="ghost", size="sm",
-            command=self._close_popup,
+            command=self._date_popup.close,
         ).pack(padx=SPACING["sm"], pady=(0, SPACING["sm"]), fill="x")
-        popup.bind("<Escape>", lambda _e: self._close_popup())
-        popup.after(50, popup.focus_set)
-        self._popup = popup
-
-        # Закрытие по клику вне popup'а. Биндим на тот Toplevel, в котором
-        # живёт сама иконка (модалка экспорта или главное окно). Сам popup —
-        # отдельный Toplevel, его клики сюда не приходят, поэтому внутри
-        # него можно спокойно тыкать по дням и стрелкам.
-        try:
-            host = self.winfo_toplevel()
-        except tk.TclError:
-            host = None
-        if host is not None:
-            self._outside_host = host
-            self._outside_bind_id = host.bind(
-                "<Button-1>", self._on_outside_click, add="+",
-            )
-
-    def _on_outside_click(self, event) -> None:
-        if self._popup is None or not self._popup.winfo_exists():
-            return
-        w = event.widget
-        try:
-            toplevel = w.winfo_toplevel()
-        except tk.TclError:
-            return
-        # Клик внутри popup'а — игнор (на всякий случай, обычно сюда не доходит).
-        if toplevel is self._popup:
-            return
-        # Клик по самой иконке (или её внутренним подвиджетам CTk) — пусть
-        # сработает её command и сам сделает toggle. Иначе будет close+reopen.
-        if self._is_descendant(w, self):
-            return
-        self._close_popup()
-
-    @staticmethod
-    def _is_descendant(widget, ancestor) -> bool:
-        while widget is not None:
-            if widget is ancestor:
-                return True
-            widget = getattr(widget, "master", None)
-        return False
 
     def _commit(self, value: str) -> None:
         self._target.set(value)
         if self._on_pick is not None:
             self._on_pick()
-        self._close_popup()
-
-    def _close_popup(self) -> None:
-        if self._outside_host is not None and self._outside_bind_id is not None:
-            try:
-                self._outside_host.unbind("<Button-1>", self._outside_bind_id)
-            except tk.TclError:
-                pass
-        self._outside_host = None
-        self._outside_bind_id = None
-        if self._popup is not None:
-            try:
-                if self._popup.winfo_exists():
-                    self._popup.destroy()
-            except tk.TclError:
-                pass
-            self._popup = None
+        self._date_popup.close()
 
 
 class _CalendarFrame(ctk.CTkFrame):
@@ -200,14 +134,16 @@ class _CalendarFrame(ctk.CTkFrame):
             nav, text="", font=font(13, "bold"), text_color=C["text"],
         )
         self._title_lbl.pack(side="left", expand=True)
-        AppButton(
-            nav, text="›", variant="ghost", size="sm", width=24,
-            command=lambda: self._shift_month(1),
-        ).pack(side="right", padx=(0, SPACING["xs"]))
+        # Зеркально левой стороне: год — снаружи, месяц — внутри.
+        # Итог симметричен: « ‹  Месяц Год  › »
         AppButton(
             nav, text="»", variant="ghost", size="sm", width=28,
             command=lambda: self._shift_year(1),
         ).pack(side="right")
+        AppButton(
+            nav, text="›", variant="ghost", size="sm", width=24,
+            command=lambda: self._shift_month(1),
+        ).pack(side="right", padx=(0, SPACING["xs"]))
 
         # Заголовки дней недели
         headers = ctk.CTkFrame(self, fg_color="transparent")

@@ -22,6 +22,24 @@ TRANSCRIPTION_PROVIDERS = ("local", "deepgram")
 TRANSCRIPTION_LANGUAGES = ("multi", "ru", "en", "de", "fr", "es", "zh", "ja")
 DATE_FORMATS = ("DD.MM.YYYY", "YYYY-MM-DD", "MM/DD/YYYY")
 
+# Масштаб интерфейса — множитель CTk widget-scaling. 1.0 = дефолт CTk;
+# 0.9 — наш базовый «поджатый» вид. Пользователь меняет в Настройках.
+UI_SCALE_DEFAULT = 0.9
+UI_SCALE_MIN = 0.7
+UI_SCALE_MAX = 1.6
+# Пресеты для выпадашки. Намеренно ⊂ [MIN, MAX]: clamp шире набора пресетов,
+# чтобы терпеть значения из вручную отредактированного config.json.
+UI_SCALES = (0.8, 0.9, 1.0, 1.1, 1.25, 1.5)
+
+
+def clamp_ui_scale(value) -> float:
+    """Приводит масштаб к допустимому диапазону; нечисловой мусор → дефолт."""
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return UI_SCALE_DEFAULT
+    return max(UI_SCALE_MIN, min(UI_SCALE_MAX, v))
+
 
 class ConfigValidationError(ValueError):
     pass
@@ -69,6 +87,7 @@ class AppConfig:
 
     # Интерфейс
     include_private_chats: bool = False
+    ui_scale: float = UI_SCALE_DEFAULT
 
     # Настройки Markdown
     markdown: MarkdownSettings = field(default_factory=MarkdownSettings)
@@ -96,6 +115,11 @@ class AppConfig:
                 f"local_whisper_model must be one of {WHISPER_MODELS}"
             )
 
+        if not (UI_SCALE_MIN <= self.ui_scale <= UI_SCALE_MAX):
+            raise ConfigValidationError(
+                f"ui_scale must be within [{UI_SCALE_MIN}, {UI_SCALE_MAX}], got {self.ui_scale!r}"
+            )
+
         self.markdown.validate()
 
     @property
@@ -115,6 +139,7 @@ class AppConfig:
             "local_whisper_model": self.local_whisper_model,
             # deepgram_api_key намеренно исключён — хранится в Keyring
             "include_private_chats": self.include_private_chats,
+            "ui_scale": self.ui_scale,
             "markdown": self.markdown.to_dict(),
         }
 

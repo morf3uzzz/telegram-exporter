@@ -29,13 +29,16 @@ from .views.help_page import HelpPage
 from .views.export_modal import ExportModal
 from .components.sidebar import Sidebar
 
-from ..models.config import AppConfig
+from ..models.config import AppConfig, clamp_ui_scale
 from ..models.export_task import ExportTask, ExportProgress, ExportFormat, AuthorFilter
 from ..core.credentials import CredentialsManager
 from ..core.client import TelegramClientManager
 from ..core.auth import AuthService, AuthStep, QrNeedsPassword
 from ..core.orchestrator import ExportOrchestrator
 from ..core.profiles import ProfileManager, Profile
+from ..core import forum
+from ..core.chat_kind import chat_kind, KIND_ORDER
+from ..core.export_queue import ExportQueue, build_topic_jobs
 from ..services.export_history import ExportHistory
 from ..utils.cancellation import CancellationToken
 from ..utils.dates import resolve_period_to_range
@@ -73,6 +76,9 @@ class App(ctk.CTk):
         self.config = AppConfig.load()
         self.credentials = CredentialsManager()
         self._migrate_legacy_config()
+        # Масштаб интерфейса из конфига — ДО построения страниц (сайдбар, чаты),
+        # чтобы нативный список сразу посчитался под нужный масштаб.
+        ctk.set_widget_scaling(clamp_ui_scale(self.config.ui_scale))
 
         # Phase 2: сервисы
         self._client_mgr = TelegramClientManager(self.config, self.credentials)
@@ -89,6 +95,7 @@ class App(ctk.CTk):
         self._folder_filters: dict = {}
         self._folder_excludes: dict = {}
         self._current_folder: str = "Все чаты"
+        self._enabled_kinds: set = set(KIND_ORDER)  # фильтр по типу чата (по умолч. все)
         self._date_period_days: int = 0
         self._custom_date_from: Optional[datetime.datetime] = None
         self._custom_date_to: Optional[datetime.datetime] = None
@@ -108,6 +115,12 @@ class App(ctk.CTk):
         # Период из шапки фиксируется в момент запуска экспорта папки, чтобы
         # все чаты пакета выгружались с одинаковым диапазоном дат.
         self._folder_dates: tuple[Optional[datetime.datetime], Optional[datetime.datetime]] = (None, None)
+
+        # Состояние пакетного экспорта топиков форума (аналог folder, но изолирован).
+        self._topic_queue: Optional[ExportQueue] = None
+        self._topic_active: bool = False
+        self._topic_base: Optional[str] = None
+        self._topic_options: Optional[dict] = None
 
         # Views / Shell
         self._container = ctk.CTkFrame(self, fg_color="transparent")
@@ -154,6 +167,37 @@ class App(ctk.CTk):
         self.geometry(WINDOW["size"])
         self.minsize(*WINDOW["min_size"])
         self.configure(fg_color=C["bg"])
+        # Win11 + Tk + Python 3.14 теряет окно при разворачивании из таскбара,
+        # если последняя сохранённая Tk-геометрия попала в координаты вне
+        # подключённых мониторов (отключённый второй экран, undock ноута).
+        # MainThread штатно ждёт WM_*, окно «не отвечает» — спасает только
+        # принудительный SetWindowPos. Здесь страхуемся через <Map>.
+        self.update_idletasks()
+        self._ensure_visible()
+        self.bind("<Map>", self._on_map)
+
+    def _on_map(self, event) -> None:
+        # <Map> на toplevel ловит события ВСЕХ дочерних виджетов: путь "."
+        # входит в bindtags каждого потомка, поэтому при старте/открытии модалок
+        # хендлер дёргается сотнями. Нас интересует только разворачивание
+        # самого окна (deiconify из таскбара) — остальное отсекаем по пути.
+        if str(event.widget) == str(self):
+            self._ensure_visible()
+
+    def _ensure_visible(self) -> None:
+        """Если окно вне видимой области primary-монитора — центрируем его."""
+        try:
+            self.update_idletasks()
+            x, y = self.winfo_x(), self.winfo_y()
+            w, h = self.winfo_width(), self.winfo_height()
+            sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
+            # Полностью вне primary screen — переносим в центр.
+            if x + w <= 0 or y + h <= 0 or x >= sw or y >= sh:
+                new_x = max(0, (sw - w) // 2)
+                new_y = max(0, (sh - h) // 2)
+                self.geometry(f"{w}x{h}+{new_x}+{new_y}")
+        except Exception:
+            pass  # _ensure_visible не должен ронять UI
 
     # ---- Navigation ----
 
@@ -253,6 +297,25 @@ class App(ctk.CTk):
         modal = ExportModal(self, dialog)
         self._active_export_modal = modal
 
+    def detach_export_modal(self, modal) -> None:
+        """Отвязывает модалку при её закрытии — чтобы хвостовые события
+        экспорта не дёргали уничтоженный виджет."""
+        if self._active_export_modal is modal:
+            self._active_export_modal = None
+
+    def load_forum_topics(self, dialog, modal) -> None:
+        """Грузит список топиков форума в фоне для модалки экспорта."""
+        self._worker.submit(self._bg_load_topics, dialog, modal)
+
+    def _bg_load_topics(self, dialog, modal) -> None:
+        try:
+            c = self._client_mgr.ensure_connected()
+            topics = forum.get_forum_topics(c, dialog.entity)
+            self._worker.put_event("topics_loaded", (modal, topics))
+        except Exception as exc:
+            logger.error("load_forum_topics failed", exc=exc)
+            self._worker.put_event("topics_load_failed", (modal, str(exc)))
+
     # ---- Auth actions ----
 
     def send_code(self, phone: str) -> None:
@@ -336,6 +399,8 @@ class App(ctk.CTk):
 
     def filter_chats(self, query: str = "") -> None:
         dialogs = self._get_folder_dialogs(self._current_folder)
+        if len(self._enabled_kinds) < len(KIND_ORDER):
+            dialogs = [d for d in dialogs if chat_kind(d) in self._enabled_kinds]
         if query:
             q = query.lower()
             dialogs = [d for d in dialogs if q in (d.name or "").lower()]
@@ -343,6 +408,10 @@ class App(ctk.CTk):
 
     def set_current_folder(self, folder_name: str) -> None:
         self._current_folder = folder_name or "Все чаты"
+
+    def set_kind_filter(self, kinds) -> None:
+        """Какие типы чатов показывать (множество ключей KIND_ORDER)."""
+        self._enabled_kinds = set(kinds) if kinds else set(KIND_ORDER)
 
     def set_date_period(self, days: int) -> None:
         self._date_period_days = max(0, int(days))
@@ -415,9 +484,79 @@ class App(ctk.CTk):
             lambda etype, payload: self._worker.put_event(etype, payload),
         )
 
+    def start_topics_export(self, dialog, output_path: str, modal, topics) -> None:
+        """Запускает последовательный экспорт выбранных топиков форума."""
+        import datetime
+        import os
+        from ..exporters.base import sanitize_filename
+
+        if not topics:
+            self._worker.put_event("error", "Не выбран ни один топик.")
+            return
+
+        ts = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        base = os.path.join(output_path, f"{sanitize_filename(dialog.name or 'forum')}_{ts}")
+        os.makedirs(base, exist_ok=True)
+
+        self._topic_queue = ExportQueue(build_topic_jobs(dialog, topics))
+        self._topic_active = True
+        self._topic_base = base
+        self._topic_options = modal.get_export_options()
+        self._active_export_modal = modal
+        self._export_next_topic()
+
+    def _export_next_topic(self) -> None:
+        q = self._topic_queue
+        if not self._topic_active or q is None or not q.has_next():
+            if q is not None:
+                self._worker.put_event("topic_done", (self._topic_base, q.ok, q.failed))
+            self._topic_active = False
+            self._topic_queue = None
+            # _topic_base уже захвачен в payload выше; опции больше не нужны.
+            # _active_export_modal НЕ трогаем — он нужен обработчику topic_done
+            # (сработает позже из очереди событий и покажет финал в модалке).
+            self._topic_base = None
+            self._topic_options = None
+            return
+
+        job = q.next()
+        self._worker.put_event("topic_progress", (q.current_index, q.total, job.topic_title))
+
+        opts = self._topic_options or {}
+        self._token = CancellationToken()
+        task = ExportTask(
+            chat_id=getattr(job.dialog, "id", 0),
+            chat_name=job.dialog.name or "Chat",
+            output_path=self._topic_base,
+            format=opts.get("format", ExportFormat.BOTH),
+            date_from=opts.get("date_from"),
+            date_to=opts.get("date_to"),
+            topic_id=job.topic_id,
+            topic_title=job.topic_title,
+            download_media=opts.get("download_media", False),
+            collect_analytics=opts.get("collect_analytics", False),
+            transcribe_audio=opts.get("transcribe_audio", False),
+            transcription_provider=self.config.transcription_provider,
+            transcription_language=self.config.transcription_language,
+            local_whisper_model=self.config.local_whisper_model,
+            deepgram_api_key=self.credentials.load_deepgram_key() or "",
+            author_filter=AuthorFilter(),
+            words_per_file=opts.get("words_per_file", 50_000),
+        )
+        progress = ExportProgress()
+        deepgram_key = self.credentials.load_deepgram_key()
+        orch = ExportOrchestrator(self._client_mgr, self.config, self._history, deepgram_key)
+        token = self._token
+        self._worker.submit(
+            orch.run, job.dialog, task, token, progress,
+            lambda etype, payload: self._worker.put_event(etype, payload),
+        )
+
     def cancel_export(self) -> None:
         self._token.cancel()
         self._folder_active = False
+        self._topic_active = False
+        self._topic_queue = None
 
     def export_current_folder(self, mode: str = "По чатам", transcribe: bool = False) -> None:
         folder = self._current_folder
@@ -527,6 +666,20 @@ class App(ctk.CTk):
     def set_local_whisper_model(self, model: str) -> None:
         self.config = _update_config(self.config, local_whisper_model=model or "base")
         self.config.save()
+
+    def set_ui_scale(self, value) -> None:
+        """Применяет масштаб интерфейса вживую (CTk + нативный список) и сохраняет."""
+        scale = clamp_ui_scale(value)
+        ctk.set_widget_scaling(scale)
+        try:
+            self.chats_page.apply_scale()
+        except Exception:
+            pass
+        self.config = _update_config(self.config, ui_scale=scale)
+        try:
+            self.config.save()
+        except Exception as exc:
+            logger.warning(f"save ui_scale failed: {exc}")
 
     # ---- Background tasks ----
 
@@ -824,6 +977,11 @@ class App(ctk.CTk):
         d.on("add_account_qr_error",   self._on_add_account_qr_error)
         d.on("proxy_test_result",     self._on_proxy_test_result)
 
+        d.on("topics_loaded",      self._on_topics_loaded)
+        d.on("topics_load_failed", self._on_topics_load_failed)
+        d.on("topic_progress",     self._on_topic_progress)
+        d.on("topic_done",         self._on_topic_done)
+
         d.on("chats_loaded",     self._on_chats_loaded)
         d.on("chats_load_failed", self._on_chats_load_failed)
         d.on("folders_loaded",   lambda names: self.chats_page.set_folders(names))
@@ -916,6 +1074,30 @@ class App(ctk.CTk):
         except Exception:
             pass
 
+    def _on_topics_loaded(self, payload) -> None:
+        modal, topics = payload
+        try:
+            modal.set_topics(topics)
+        except Exception:
+            pass
+
+    def _on_topics_load_failed(self, payload) -> None:
+        modal, message = payload
+        try:
+            modal.set_topics_error(message or "Не удалось загрузить топики")
+        except Exception:
+            pass
+
+    def _on_topic_progress(self, payload) -> None:
+        current, total, title = payload
+        if self._active_export_modal:
+            self._active_export_modal.on_topic_progress(current, total, title)
+
+    def _on_topic_done(self, payload) -> None:
+        export_dir, ok, failed = payload
+        if self._active_export_modal:
+            self._active_export_modal.on_topic_batch_done(export_dir, ok, failed)
+
     def _on_profile_switched(self, profile: Profile) -> None:
         # Обновляем список чатов под новый аккаунт + карточки аккаунтов
         # (пометка «активный»), затем показываем страницу «Чаты».
@@ -953,6 +1135,11 @@ class App(ctk.CTk):
         mb.showinfo("Информация", msg)
 
     def _on_export_start(self, payload) -> None:
+        # В топик-пакете лейбл «Топик N/total: …» ставит _on_topic_progress —
+        # не даём per-topic export_start затереть общий счётчик. Прогресс-бар
+        # дальше наполняется через export_progress (он несёт count/total).
+        if self._topic_active:
+            return
         chat_name, total = payload
         if self._active_export_modal:
             self._active_export_modal.on_export_start(chat_name, total)
@@ -972,8 +1159,14 @@ class App(ctk.CTk):
             self._active_export_modal.on_model_download_progress(ratio, text)
 
     def _on_export_done(self, payload) -> None:
-        import os, shutil
+        import os
+        import shutil
         export_dir, files = payload
+        # Топик-пакет: ведём к следующему топику, финал покажет topic_done.
+        if self._topic_active:
+            self._topic_queue.record(True)
+            self._export_next_topic()
+            return
         if self._active_export_modal:
             self._active_export_modal.on_export_done(export_dir, files)
         if self._folder_active:
@@ -1000,6 +1193,10 @@ class App(ctk.CTk):
             self._export_next_in_folder()
 
     def _on_export_error(self, msg: str) -> None:
+        if self._topic_active:
+            self._topic_queue.record(False)
+            self._export_next_topic()
+            return
         if self._active_export_modal:
             self._active_export_modal.on_export_error(msg)
         if self._folder_active:
@@ -1010,14 +1207,17 @@ class App(ctk.CTk):
         if self._active_export_modal:
             self._active_export_modal.on_export_cancelled()
         self._folder_active = False
+        self._topic_active = False
+        self._topic_queue = None
 
     def _on_folder_progress(self, payload) -> None:
         current, total, label = payload
         self.chats_page.set_status(f"Папка: {current}/{total} — {label}")
 
     def _on_folder_done(self, total: int) -> None:
-        import os, glob as _glob
-        ok = sum(1 for l in self._folder_log if l.startswith("OK"))
+        import os
+        import glob as _glob
+        ok = sum(1 for line in self._folder_log if line.startswith("OK"))
         err = total - ok
 
         if self._folder_mode == "Один .md на папку" and self._folder_export_base:

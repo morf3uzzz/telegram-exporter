@@ -417,7 +417,10 @@ class TestEventDispatcher(unittest.TestCase):
     def test_off_removes_handler(self):
         d = self.EventDispatcher()
         received = []
-        handler = lambda p: received.append(p)
+
+        def handler(p):
+            received.append(p)
+
         d.on("ev", handler)
         d.off("ev", handler)
         d.dispatch("ev", 1)

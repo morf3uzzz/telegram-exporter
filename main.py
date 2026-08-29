@@ -9,7 +9,20 @@ main.py — точка входа нового приложения.
 
 import sys
 import traceback
-from pathlib import Path
+
+
+# Python 3.13+ для Tkinter по умолчанию включает Per-Monitor V2 DPI awareness
+# на Windows. На Win11 это даёт регрессию: при смене effective DPI монитора
+# (док/undock, переключение экранов, спящий внешний дисплей) свёрнутое окно
+# при deiconify уезжает в координаты вне видимой области, и клик по таскбару
+# не разворачивает его, хотя процесс жив. Принудительно ставим System DPI
+# aware (как на 3.11, где CI автора и проблемы нет) ДО любых импортов Tk.
+if sys.platform == "win32":
+    try:
+        import ctypes
+        ctypes.windll.shcore.SetProcessDpiAwareness(1)  # PROCESS_SYSTEM_DPI_AWARE
+    except Exception:
+        pass
 
 
 def main() -> None:

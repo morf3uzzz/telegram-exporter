@@ -7,7 +7,7 @@ ExportMessage — иммутабельное представление одно
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import Optional
 
@@ -127,7 +127,7 @@ class ExportMessage:
         d["text"] = self.text
 
         if self.links:
-            d["links"] = [l.to_dict() for l in self.links]
+            d["links"] = [lnk.to_dict() for lnk in self.links]
         if self.views is not None:
             d["views"] = self.views
         if self.forwards is not None:

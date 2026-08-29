@@ -1,8 +1,6 @@
 """Tests for tg_exporter.models — Config, ExportMessage, ExportTask."""
 
 import dataclasses
-import datetime
-import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -67,7 +65,6 @@ class TestAppConfig(unittest.TestCase):
 
     def test_save_load_roundtrip(self):
         with tempfile.TemporaryDirectory() as d:
-            from tg_exporter.models.config import CONFIG_FILE, CONFIG_DIR
             import tg_exporter.models.config as cfg_mod
             orig_file = cfg_mod.CONFIG_FILE
             orig_dir = cfg_mod.CONFIG_DIR
@@ -250,7 +247,7 @@ class TestExportTask(unittest.TestCase):
         self.assertGreater(eta, 0)
 
     def test_export_task_immutable(self):
-        from tg_exporter.models.export_task import ExportTask, ExportFormat
+        from tg_exporter.models.export_task import ExportTask
         task = ExportTask(chat_id=1, chat_name="Test", output_path="/tmp")
         task2 = task.with_last_id(500)
         self.assertIsNone(task.last_exported_id)
