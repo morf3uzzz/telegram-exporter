@@ -1,7 +1,7 @@
 [Setup]
 AppId={{FAD5F563-8D91-4D92-9A92-0FD0BE8C2C9B}}
 AppName=Telegram Exporter
-AppVersion=1.0.0
+AppVersion=2.2.0
 AppPublisher=Telegram Exporter
 DefaultDirName={autopf}\Telegram Exporter
 DefaultGroupName=Telegram Exporter

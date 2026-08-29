@@ -31,3 +31,7 @@ CLAUDE.md
 
 # Visual brainstorming companion
 .superpowers/
+
+# Внутренние рабочие заметки агентов — не часть проекта
+docs/superpowers/
+claudedocs/
