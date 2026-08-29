@@ -1172,14 +1172,12 @@ class App(ctk.CTk):
         if self._folder_active:
             chat_name = getattr(self._folder_queue[self._folder_index - 1], "name", "chat") or "chat"
             if self._folder_mode in ("Один .md на чат", "Один .md на папку") and self._folder_export_base:
-                from ..exporters.base import sanitize_filename
-                safe_name = sanitize_filename(chat_name)
+                from .folder_merge import unique_md_dest
                 for f in files:
                     if f.endswith(".md") and os.path.exists(f):
-                        dest = os.path.join(self._folder_export_base, f"{safe_name}.md")
-                        if os.path.exists(dest):
-                            base_, ext_ = os.path.splitext(dest)
-                            dest = f"{base_}_2{ext_}"
+                        # Чат мог разбиться на несколько частей — каждой нужно
+                        # своё имя, иначе части затирают друг друга.
+                        dest = unique_md_dest(self._folder_export_base, chat_name)
                         try:
                             shutil.move(f, dest)
                         except Exception:
@@ -1222,7 +1220,13 @@ class App(ctk.CTk):
 
         if self._folder_mode == "Один .md на папку" and self._folder_export_base:
             # Объединяем все .md в один файл
-            md_files = sorted(_glob.glob(os.path.join(self._folder_export_base, "*.md")))
+            from .folder_merge import merge_sort_key
+            # Части одного чата («Чат_2.md», «Чат_10.md») должны идти по номеру,
+            # иначе сообщения в общем файле перемешиваются.
+            md_files = sorted(
+                _glob.glob(os.path.join(self._folder_export_base, "*.md")),
+                key=merge_sort_key,
+            )
             if md_files:
                 merged_path = os.path.join(self._folder_export_base, "_все_чаты.md")
                 try:
