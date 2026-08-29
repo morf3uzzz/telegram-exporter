@@ -336,6 +336,21 @@ class AnchoredPopupController:
         # если само окно ещё живо до idle.
         self._popup = None
         if popup is not None:
+            # Окно живёт ещё один idle-тик (см. ниже), поэтому обезвреживаем
+            # его ПРЯМО СЕЙЧАС: снимаем собственные биндинги и убираем с
+            # экрана. Иначе Tk успевает доставить <FocusOut>/<Escape> уже
+            # приговорённому окну, и обработчик трогает то, что вот-вот
+            # исчезнет — тот же SIGSEGV в TkWmDeadWindow.
+            for _seq in ("<FocusOut>", "<Escape>", "<Configure>"):
+                try:
+                    popup.unbind(_seq)
+                except tk.TclError:
+                    pass
+            try:
+                popup.withdraw()
+            except tk.TclError:
+                pass
+
             # НЕ destroy() здесь: close() зовётся из Tk-биндингов (<Button-1>
             # хоста, <Deactivate>, <MouseWheel>, <Escape>, <Destroy> якоря).
             # Tk в этот момент ещё идёт по цепочке биндингов окна, и снос его
@@ -351,8 +366,13 @@ class AnchoredPopupController:
             try:
                 popup.after_idle(_destroy_later)
             except tk.TclError:
-                # Окно/интерпретатор уже мертвы — сносить нечего.
-                pass
+                # Планировать некуда (окно/интерпретатор умирают) — сносим
+                # сразу: здесь мы заведомо вне цепочки биндингов этого окна.
+                try:
+                    if popup.winfo_exists():
+                        popup.destroy()
+                except tk.TclError:
+                    pass
 
     # ---- Internal ----
 

@@ -22,6 +22,8 @@ class _FakePopup:
     def __init__(self):
         self.destroyed = False
         self.idle_calls = []
+        self.unbound = []
+        self.withdrawn = False
 
     def winfo_exists(self):
         return not self.destroyed
@@ -34,6 +36,12 @@ class _FakePopup:
 
     def bind(self, *_a, **_k):
         return "id"
+
+    def unbind(self, sequence, funcid=None):
+        self.unbound.append(sequence)
+
+    def withdraw(self):
+        self.withdrawn = True
 
 
 def _controller_with_popup():
@@ -78,3 +86,17 @@ def test_double_close_is_safe():
     for fn in list(popup.idle_calls):
         fn()
     assert popup.destroyed is True
+
+
+def test_close_neutralizes_popup_immediately():
+    """
+    Между close() и idle окно ещё живо. Оно обязано быть обезврежено:
+    свои биндинги сняты и окно убрано с экрана — иначе Tk доставит
+    <FocusOut>/<Escape> приговорённому окну (тот же SIGSEGV).
+    """
+    c = _controller_with_popup()
+    popup = c._popup
+    c.close()
+    assert "<FocusOut>" in popup.unbound
+    assert "<Escape>" in popup.unbound
+    assert popup.withdrawn is True
