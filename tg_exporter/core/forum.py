@@ -59,7 +59,13 @@ def get_forum_topics(client, entity, *, page_limit: int = 100) -> list[ForumTopi
             break
 
         last = batch[-1]
-        offset_topic = getattr(last, "id", 0) or 0
-        offset_id = getattr(last, "top_message", 0) or 0
+        next_topic = getattr(last, "id", 0) or 0
+        next_id = getattr(last, "top_message", 0) or 0
+        # Если offset не сдвинулся, сервер будет отдавать ту же страницу
+        # бесконечно — выходим, вместо того чтобы крутиться вечно.
+        if next_topic == offset_topic and next_id == offset_id:
+            break
+        offset_topic = next_topic
+        offset_id = next_id
 
     return collected

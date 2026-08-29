@@ -82,3 +82,33 @@ class TestGetForumTopics(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_pagination_stops_if_offset_does_not_advance():
+    """
+    Страховка от бесконечного цикла: если сервер отдаёт полную страницу, но
+    offset не двигается (аномальный id=0), пагинация обязана остановиться,
+    а не крутиться вечно.
+    """
+    from tg_exporter.core import forum as forum_mod
+
+    class _Stuck:
+        id = 0
+        title = None
+        top_message = 0
+
+    class _Res:
+        def __init__(self):
+            self.topics = [_Stuck(), _Stuck(), _Stuck()]
+            self.count = 100
+
+    calls = {"n": 0}
+
+    def client(_req):
+        calls["n"] += 1
+        if calls["n"] > 50:
+            raise AssertionError("пагинация зациклилась: offset не сдвигается")
+        return _Res()
+
+    forum_mod.get_forum_topics(client, object(), page_limit=3)
+    assert calls["n"] <= 50
