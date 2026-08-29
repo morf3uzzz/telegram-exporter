@@ -93,10 +93,12 @@ class ExportOrchestrator:
 
         # --- Подготовка директории ---
         timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        chat_title = _safe_name(dialog.name or "chat", 60)
-        if task.topic_title:
-            chat_title = f"{chat_title}_topic_{_safe_name(task.topic_title, 40)}"
-        export_dir = os.path.join(task.output_path, f"{chat_title}_{timestamp}")
+        export_dir = os.path.join(task.output_path, build_export_dirname(
+            dialog.name or "chat",
+            topic_id=task.topic_id,
+            topic_title=task.topic_title,
+            timestamp=timestamp,
+        ))
         os.makedirs(export_dir, exist_ok=True)
 
         # --- Подсчёт сообщений ---
@@ -428,6 +430,31 @@ def _safe_name(name: str, max_len: int) -> str:
     if len(name) > max_len:
         name = name[:max_len].rstrip("_")
     return name or "chat"
+
+
+def build_export_dirname(
+    chat_name: str,
+    *,
+    topic_id: Optional[int] = None,
+    topic_title: Optional[str] = None,
+    timestamp: str,
+) -> str:
+    """
+    Имя директории экспорта: «{чат}[_topic_{id}[_{название}]]_{timestamp}».
+
+    topic_id обязателен в имени, потому что названия топиков в форуме не
+    уникальны: два разных топика «Общее», экспортированные в одну секунду,
+    иначе дают одно имя папки и затирают друг друга (пакетный экспорт
+    топиков делает этот случай штатным).
+    """
+    name = _safe_name(chat_name or "chat", 60)
+    if topic_id is not None:
+        name = f"{name}_topic_{topic_id}"
+        if topic_title:
+            name = f"{name}_{_safe_name(topic_title, 40)}"
+    elif topic_title:
+        name = f"{name}_topic_{_safe_name(topic_title, 40)}"
+    return f"{name}_{timestamp}"
 
 
 def _maybe_send_progress(send: EventCallback, count: int, total: Optional[int]) -> None:
