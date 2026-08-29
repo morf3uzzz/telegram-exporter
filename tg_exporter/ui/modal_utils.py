@@ -331,13 +331,28 @@ class AnchoredPopupController:
                     pass
         self._host = None
         self._host_binds = []
-        if self._popup is not None:
+        popup = self._popup
+        # Ссылку снимаем сразу: is_open() должен стать False немедленно, даже
+        # если само окно ещё живо до idle.
+        self._popup = None
+        if popup is not None:
+            # НЕ destroy() здесь: close() зовётся из Tk-биндингов (<Button-1>
+            # хоста, <Deactivate>, <MouseWheel>, <Escape>, <Destroy> якоря).
+            # Tk в этот момент ещё идёт по цепочке биндингов окна, и снос его
+            # изнутри обработчика приводит к чтению освобождённой памяти в
+            # TkWmDeadWindow (SIGSEGV). Откладываем до конца обработки события.
+            def _destroy_later(w=popup) -> None:
+                try:
+                    if w.winfo_exists():
+                        w.destroy()
+                except tk.TclError:
+                    pass
+
             try:
-                if self._popup.winfo_exists():
-                    self._popup.destroy()
+                popup.after_idle(_destroy_later)
             except tk.TclError:
+                # Окно/интерпретатор уже мертвы — сносить нечего.
                 pass
-            self._popup = None
 
     # ---- Internal ----
 
