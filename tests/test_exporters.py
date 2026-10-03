@@ -5,7 +5,7 @@ import os
 import tempfile
 import unittest
 
-from tg_exporter.models.message import ExportMessage, ReactionItem, PollData, PollAnswer
+from tg_exporter.models.message import ExportMessage, MediaType, ReactionItem, PollData, PollAnswer
 from tg_exporter.models.config import MarkdownSettings
 
 
@@ -89,6 +89,12 @@ class TestJsonExporter(unittest.TestCase):
         msg = _msg(id=1, reactions=(ReactionItem(emoji="👍", count=3),))
         data = self._run([msg])
         self.assertEqual(data["messages"][0]["reactions"][0]["emoji"], "👍")
+
+    def test_media_path_and_album_id_serialised(self):
+        msg = _msg(grouped_id=42).with_media("media/photo/a_msg1.jpg", MediaType.PHOTO)
+        data = self._run([msg])
+        self.assertEqual(data["messages"][0]["media_path"], "media/photo/a_msg1.jpg")
+        self.assertEqual(data["messages"][0]["grouped_id"], 42)
 
     def test_finalize_returns_registered_path(self):
         exp = self.JsonExporter()
@@ -207,6 +213,95 @@ class TestMarkdownExporter(unittest.TestCase):
         self.assertIn("🎤", result)
         self.assertIn("*Расшифровка голосового:*", result)
         self.assertIn("Привет мир", result)
+
+    # --- Медиа: привязка файла к сообщению ---
+
+    def _plain(self, **kw):
+        return MarkdownSettings(include_timestamps=False, include_author=False, **kw)
+
+    def test_media_line_points_to_file(self):
+        msg = _msg(text="Шаг 1").with_media("media/photo/2024-06-15_10-00-00_msg1.jpg", MediaType.PHOTO)
+        result = self._fmt(msg, self._plain())
+        self.assertIn("Шаг 1", result)
+        self.assertIn("📎 Фото: media/photo/2024-06-15_10-00-00_msg1.jpg", result)
+
+    def test_media_line_is_a_link_in_markdown_mode(self):
+        msg = _msg(text="Шаг 1").with_media("media/video/v_msg1.mp4", MediaType.VIDEO)
+        result = self._fmt(msg, self._plain(plain_text=False))
+        self.assertIn("📎 Видео: [v_msg1.mp4](media/video/v_msg1.mp4)", result)
+
+    def test_media_without_file_is_still_mentioned(self):
+        # Медиа не скачивали (или не удалось) — читателю всё равно важно знать,
+        # что в сообщении было вложение.
+        result = self._fmt(_msg(text="", media_type=MediaType.PHOTO), self._plain())
+        self.assertEqual(result, "📎 Фото (файл не скачан)")
+
+    def test_sticker_is_mentioned_without_download_note(self):
+        result = self._fmt(_msg(text="", media_type=MediaType.STICKER), self._plain())
+        self.assertEqual(result, "📎 Стикер")
+
+    def test_media_path_survives_plain_text_cleanup(self):
+        # plain_text вычищает `*` и обратные кавычки из текста — путь трогать нельзя.
+        msg = _msg(text="**жирный**").with_media("media/documents/d_msg1_a_b.pdf", MediaType.DOCUMENT)
+        result = self._fmt(msg, self._plain())
+        self.assertIn("media/documents/d_msg1_a_b.pdf", result)
+
+    def _album(self, group=500, start=10, count=3, caption="1 — начало прогрева", caption_at=0):
+        items = []
+        for i in range(count):
+            m = _msg(
+                id=start + i, grouped_id=group, from_name="Автор",
+                text=caption if i == caption_at else "",
+            )
+            items.append(m.with_media(f"media/photo/p_msg{start + i}.jpg", MediaType.PHOTO))
+        return items
+
+    def test_album_is_one_block_with_caption_and_all_files(self):
+        s = MarkdownSettings(include_timestamps=True, include_author=True)
+        content = self._read(self._run(self._album(), settings=s)[0])
+        self.assertEqual(content.count("Автор"), 1)          # один заголовок на альбом
+        self.assertEqual(content.count("1 — начало прогрева"), 1)
+        self.assertIn("📎 Альбом — вложений: 3", content)
+        for i in (10, 11, 12):
+            self.assertIn(f"media/photo/p_msg{i}.jpg", content)
+        # Файлы идут сразу под подписью, в порядке сообщений.
+        self.assertLess(content.index("1 — начало прогрева"), content.index("p_msg10.jpg"))
+        self.assertLess(content.index("p_msg10.jpg"), content.index("p_msg12.jpg"))
+
+    def test_album_caption_on_later_item_is_kept(self):
+        content = self._read(self._run(self._album(caption_at=2))[0])
+        self.assertEqual(content.count("1 — начало прогрева"), 1)
+        self.assertIn("📎 Альбом — вложений: 3", content)
+
+    def test_two_albums_stay_separate(self):
+        first = self._album(group=500, start=10, caption="1 — начало прогрева")
+        second = self._album(group=501, start=20, caption="2 — вовлечение")
+        content = self._read(self._run(first + second)[0])
+        self.assertEqual(content.count("📎 Альбом — вложений: 3"), 2)
+        # Фото первого этапа стоят до подписи второго, фото второго — после неё.
+        self.assertLess(content.index("p_msg12.jpg"), content.index("2 — вовлечение"))
+        self.assertLess(content.index("2 — вовлечение"), content.index("p_msg20.jpg"))
+
+    def test_message_after_album_keeps_order(self):
+        content = self._read(self._run(self._album() + [_msg(id=99, text="после альбома")])[0])
+        self.assertLess(content.index("p_msg12.jpg"), content.index("после альбома"))
+
+    def test_trailing_album_is_not_lost(self):
+        content = self._read(self._run([_msg(id=1, text="до")] + self._album())[0])
+        self.assertIn("p_msg12.jpg", content)
+
+    def test_album_is_not_split_between_part_files(self):
+        s = MarkdownSettings(words_per_file=1000)
+        filler = [_msg(id=i, text="слово " * 400) for i in range(1, 3)]
+        files = self._run(filler + self._album(count=5) + [_msg(id=90, text="слово " * 700)], settings=s)
+        holders = [f for f in files if "p_msg1" in self._read(f)]
+        self.assertEqual(len(holders), 1)
+        self.assertEqual(self._read(holders[0]).count("media/photo/p_msg"), 5)
+
+    def test_single_item_album_renders_as_plain_media(self):
+        content = self._read(self._run(self._album(count=1))[0])
+        self.assertNotIn("Альбом", content)
+        self.assertIn("📎 Фото: media/photo/p_msg10.jpg", content)
 
     # --- Exporter integration ---
 

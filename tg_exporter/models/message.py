@@ -101,10 +101,14 @@ class ExportMessage:
     reactions: tuple[ReactionItem, ...] = field(default_factory=tuple)
     poll: Optional[PollData] = None
 
-    # Медиа (заполняется после загрузки)
+    # Медиа
     media_type: Optional[MediaType] = None
-    media_path: Optional[str] = None   # локальный путь после скачивания
+    # Путь к скачанному файлу ОТНОСИТЕЛЬНО папки экспорта, через «/»
+    # (media/photo/...). Абсолютный путь выдал бы домашнюю папку пользователя.
+    media_path: Optional[str] = None
     media_mime: Optional[str] = None
+    # Альбом: у всех его сообщений (фото/видео, отправленных разом) id общий.
+    grouped_id: Optional[int] = None
 
     # Транскрипция (заполняется после обработки)
     transcription: Optional[str] = None
@@ -152,6 +156,8 @@ class ExportMessage:
             d["media_type"] = self.media_type.value
         if self.media_path:
             d["media_path"] = self.media_path
+        if self.grouped_id is not None:
+            d["grouped_id"] = self.grouped_id
         if self.transcription:
             d["transcription"] = self.transcription
 

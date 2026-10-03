@@ -71,6 +71,7 @@ def message_to_export(message) -> ExportMessage:
 
     # Медиа-тип (определяем без скачивания)
     media_type = _detect_media_type(message)
+    grouped_id = getattr(message, "grouped_id", None)
 
     # message.date иногда может быть None (редкие сервисные сообщения
         # или некорректные записи в old chats). Не роняем конвертацию.
@@ -97,6 +98,7 @@ def message_to_export(message) -> ExportMessage:
         reactions=tuple(reactions),
         poll=poll,
         media_type=media_type,
+        grouped_id=grouped_id if isinstance(grouped_id, int) else None,
     )
 
 

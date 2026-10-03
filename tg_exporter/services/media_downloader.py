@@ -8,7 +8,9 @@ MediaDownloader — скачивание медиафайлов и подгот�
 from __future__ import annotations
 
 import asyncio
+import datetime
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -77,10 +79,10 @@ class MediaDownloader:
         msg,  # Telethon Message
         media_dirs: MediaDirs,
         token: Optional[CancellationToken] = None,
-        skip_msg_ids: Optional[set] = None,
     ) -> Optional[str]:
         """
-        Скачивает медиа из сообщения в нужную поддиректорию.
+        Скачивает медиа из сообщения в нужную поддиректорию под именем
+        `media_file_stem(msg)` — по нему файл однозначно связывается с сообщением.
 
         Returns:
             Путь к скачанному файлу, или None если медиа нет / произошла ошибка.
@@ -92,12 +94,7 @@ class MediaDownloader:
         if getattr(msg, "sticker", None):
             return None
 
-        msg_id = getattr(msg, "id", 0)
-
-        # video_note (кружок) — аудио уже сохранили при транскрипции
         if getattr(msg, "video_note", None):
-            if skip_msg_ids and msg_id in skip_msg_ids:
-                return None
             target = media_dirs.video
         elif getattr(msg, "photo", None):
             target = media_dirs.photo
@@ -112,7 +109,7 @@ class MediaDownloader:
 
         try:
             result = msg.download_media(
-                file=target,
+                file=os.path.join(target, media_file_stem(msg)),
                 progress_callback=_make_progress_cb(token),
             )
             if asyncio.iscoroutine(result):
@@ -269,6 +266,41 @@ class MediaProcessingError(Exception):
 
 
 # ---- Helpers ----
+
+_UNSAFE_NAME_CHARS = re.compile(r"[^\w-]+")
+_PLAIN_EXTENSION = re.compile(r"\.[A-Za-z0-9]{1,8}")
+_ORIGINAL_NAME_MAX = 60
+
+
+def media_file_stem(msg) -> str:
+    """
+    Имя файла медиа (без каталога): `{дата}_{время}_msg{id}`, для документов —
+    плюс исходное имя: `2026-01-02_03-04-05_msg1234_Договор.pdf`.
+
+    Дата — как в сообщении (UTC, то же время печатает Markdown), id — номер
+    сообщения в чате: по имени видно, к какому сообщению и дню относится файл.
+
+    Расширение дописывает Telethon, но только если в имени нет точки
+    (`os.path.splitext`), поэтому в основе точек быть не должно.
+    """
+    stem = f"msg{getattr(msg, 'id', 0) or 0}"
+    date = getattr(msg, "date", None)
+    if isinstance(date, datetime.datetime):
+        stem = f"{date:%Y-%m-%d_%H-%M-%S}_{stem}"
+
+    original = getattr(getattr(msg, "file", None), "name", None)
+    if not isinstance(original, str) or not original.strip():
+        return stem
+    # Имя приходит от отправителя: берём только последний сегмент пути и
+    # оставляем буквы/цифры/«_»/«-» — без пробелов, точек и разделителей.
+    base, ext = os.path.splitext(original.replace("\\", "/").rsplit("/", 1)[-1])
+    base = _UNSAFE_NAME_CHARS.sub("_", base).strip("_")[:_ORIGINAL_NAME_MAX].rstrip("_")
+    if base:
+        stem = f"{stem}_{base}"
+    if _PLAIN_EXTENSION.fullmatch(ext):
+        stem += ext
+    return stem
+
 
 class _CancelledDuringDownload(Exception):
     """Внутреннее исключение — отмена во время progress_callback."""

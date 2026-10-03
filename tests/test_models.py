@@ -146,6 +146,19 @@ class TestExportMessage(unittest.TestCase):
         self.assertEqual(msg2.media_path, "/path/file.ogg")
         self.assertEqual(msg2.media_type, MediaType.VOICE)
 
+    def test_to_dict_links_media_file_to_message(self):
+        from tg_exporter.models.message import MediaType
+        msg = self._make(grouped_id=777).with_media(
+            "media/photo/2024-06-15_10-00-00_msg1.jpg", MediaType.PHOTO,
+        )
+        d = msg.to_dict()
+        self.assertEqual(d["media_type"], "photo")
+        self.assertEqual(d["media_path"], "media/photo/2024-06-15_10-00-00_msg1.jpg")
+        self.assertEqual(d["grouped_id"], 777)
+
+    def test_to_dict_omits_grouped_id_when_not_album(self):
+        self.assertNotIn("grouped_id", self._make().to_dict())
+
     def test_frozen_prevents_mutation(self):
         msg = self._make()
         with self.assertRaises((dataclasses.FrozenInstanceError, TypeError, AttributeError)):

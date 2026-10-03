@@ -22,7 +22,7 @@ from ..models.export_task import ExportTask, ExportProgress, ExportFormat
 from ..models.config import AppConfig
 from ..services.analytics import AnalyticsCollector, render_top_authors, render_activity
 from ..services.export_history import ExportHistory
-from ..services.media_downloader import MediaDownloader, MediaDirs, AudioPrepResult
+from ..services.media_downloader import MediaDownloader, MediaDirs, AudioPrepResult, media_file_stem
 from ..services.media_downloader import MediaTooLongError, MediaProcessingError
 from ..services.transcription import create_transcriber, TranscriptionError
 from ..utils.cancellation import CancellationToken, CancelledError
@@ -191,7 +191,6 @@ class ExportOrchestrator:
         count = 0
         max_msg_id = 0
         transcribe_warned = False
-        video_note_saved_ids: set[int] = set()
 
         # Отмена/ошибка в середине цикла не должна оставлять полуоткрытые файлы:
         # JsonExporter пишет потоково, и без close() result.json остаётся без
@@ -217,6 +216,8 @@ class ExportOrchestrator:
                         continue
 
                 export_msg = message_to_export(msg)
+                # WAV кружка, сохранённый при транскрипции (вместо самого видео).
+                saved_media: Optional[str] = None
 
                 # Транскрипция
                 if (
@@ -253,12 +254,20 @@ class ExportOrchestrator:
 
                             # Сохраняем WAV video_note в media/audio
                             if prep.saved_path and media_dirs:
-                                audio_out = os.path.join(media_dirs.audio, f"vn_{msg_id}.wav")
+                                audio_out = os.path.join(
+                                    media_dirs.audio, f"{media_file_stem(msg)}.wav",
+                                )
                                 try:
                                     import shutil
                                     shutil.move(prep.saved_path, audio_out)
-                                    video_note_saved_ids.add(msg_id)
+                                    saved_media = audio_out
                                 except Exception:
+                                    pass
+                            elif prep.saved_path:
+                                # Медиа не сохраняем — временный WAV больше не нужен.
+                                try:
+                                    os.remove(prep.saved_path)
+                                except OSError:
                                     pass
 
                     except (MediaTooLongError, MediaProcessingError) as exc:
@@ -271,6 +280,18 @@ class ExportOrchestrator:
                     except Exception:
                         send("export_status", "")
 
+                # Скачивание медиа — ДО записи сообщения: путь к файлу должен
+                # попасть в JSON/Markdown, иначе по экспорту не понять, к какому
+                # сообщению относится файл.
+                if media_dirs and export_msg.media_type is not None:
+                    token.raise_if_cancelled()
+                    media_file = saved_media or self._media.download(msg, media_dirs, token)
+                    token.raise_if_cancelled()
+                    if media_file:
+                        export_msg = export_msg.with_media(
+                            _relative_posix(media_file, export_dir), export_msg.media_type,
+                        )
+
                 # Запись в экспортёры
                 if json_exp:
                     json_exp.write(export_msg)
@@ -282,11 +303,6 @@ class ExportOrchestrator:
                     is_out = bool(getattr(msg, "out", False))
                     formatted = export_msg.text or ""
                     analytics.add(export_msg, formatted, is_out)
-
-                # Скачивание медиа
-                if media_dirs and export_msg.media_type is not None:
-                    token.raise_if_cancelled()
-                    self._media.download(msg, media_dirs, token, video_note_saved_ids)
 
                 count += 1
                 _maybe_send_progress(send, count, total)
@@ -455,6 +471,11 @@ def build_export_dirname(
     elif topic_title:
         name = f"{name}_topic_{_safe_name(topic_title, 40)}"
     return f"{name}_{timestamp}"
+
+
+def _relative_posix(path: str, base_dir: str) -> str:
+    """Путь относительно папки экспорта, через «/» (одинаково на всех ОС)."""
+    return os.path.relpath(path, base_dir).replace(os.sep, "/")
 
 
 def _maybe_send_progress(send: EventCallback, count: int, total: Optional[int]) -> None:
