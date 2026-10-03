@@ -65,9 +65,9 @@ class AccountsPage(ctk.CTkFrame):
                          font=font(13), text_color=C["text_sec"]).pack(anchor="w", pady=SPACING["md"])
             return
         for p in profiles:
-            self._card(p, p.phone == active_phone)
+            self._card(p, p.phone == active_phone, self._app._profiles.has_session(p))
 
-    def _card(self, profile, is_active: bool) -> None:
+    def _card(self, profile, is_active: bool, has_session: bool) -> None:
         card = ctk.CTkFrame(self._scroll, fg_color=C["surface"], corner_radius=RADIUS["lg"],
                             border_width=1, border_color=C["primary"] if is_active else C["border"])
         card.pack(fill="x", pady=(0, SPACING["sm"]))
@@ -85,18 +85,33 @@ class AccountsPage(ctk.CTkFrame):
         if masked and masked != name:
             ctk.CTkLabel(meta, text=masked, font=font(11),
                          text_color=C["text_sec"], anchor="w").pack(fill="x")
+        if not has_session:
+            # Сессии нет (отозвана или оказалась от другого аккаунта) —
+            # переключиться нельзя, только войти заново.
+            ctk.CTkLabel(meta, text="⚠ нужен вход", font=font(11),
+                         text_color=C["warning"], anchor="w").pack(fill="x")
 
         proxy_mark = " ✓" if (self._app._profiles.load_proxy(profile) or "").strip() else ""
         AppButton(inner, text="Удалить", variant="ghost", size="sm",
-                  command=lambda ph=profile.phone: self._remove(ph)).pack(side="right")
+                  command=lambda ph=profile.phone, act=is_active: self._remove(ph, act)).pack(side="right")
         AppButton(inner, text=f"🌐 Прокси{proxy_mark}", variant="secondary", size="sm",
                   command=lambda ph=profile.phone: self._app.show_proxy_settings(ph)).pack(side="right", padx=(0, SPACING["sm"]))
-        if not is_active:
+        if not has_session:
+            AppButton(inner, text="Войти", variant="primary", size="sm",
+                      command=lambda ph=profile.phone: self._app.show_add_account(ph)).pack(side="right", padx=(0, SPACING["sm"]))
+        elif not is_active:
             AppButton(inner, text="Сделать активным", variant="secondary", size="sm",
                       command=lambda ph=profile.phone: self._app.switch_profile(ph)).pack(side="right", padx=(0, SPACING["sm"]))
 
-    def _remove(self, phone: str) -> None:
-        if not mb.askyesno("Удалить аккаунт", f"Удалить профиль {phone} и его сессию?"):
+    def _remove(self, phone: str, is_active: bool) -> None:
+        if is_active:
+            question = (
+                f"Выйти из аккаунта {_mask_phone(phone)} и убрать его из списка?\n\n"
+                "Сессия на этом устройстве будет завершена."
+            )
+        else:
+            question = f"Удалить аккаунт {_mask_phone(phone)} из списка вместе с его сессией?"
+        if not mb.askyesno("Удалить аккаунт", question):
             return
+        # Список перерисуется по событию profiles_changed / profile_switched.
         self._app.remove_profile(phone)
-        self.refresh()

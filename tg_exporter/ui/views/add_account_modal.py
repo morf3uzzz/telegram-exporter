@@ -3,9 +3,11 @@ AddAccountModal — модалка добавления нового Telegram-а
 
 Использует отдельный TelegramClient поверх StringSession, не трогая текущий
 активный клиент приложения. После успеха:
-  - сохраняет session string в профиль (через App.save_active_profile_session
-    логика вызывается с параметрами нового аккаунта)
-  - переключает активный аккаунт
+  - сохраняет session string в профиль вошедшего аккаунта (ProfileManager)
+  - App переключает на него клиент (с проверкой — см. core/account_session.py)
+
+Той же модалкой выполняется повторный вход в профиль, у которого сессия больше
+не действует: номер подставляется в поле.
 
 Два режима добавления (переключатель сверху):
   • «По номеру» — phone → code → (опц. 2FA) → success.
@@ -34,7 +36,7 @@ if TYPE_CHECKING:
 class AddAccountModal(ctk.CTkToplevel):
     """Мини-флоу логина в отдельной модалке для второго+ аккаунта."""
 
-    def __init__(self, app: "App") -> None:
+    def __init__(self, app: "App", phone: str = "") -> None:
         super().__init__(app)
         prepare_modal(self, app, 440, 560, "Добавить аккаунт")
         self._app = app
@@ -47,6 +49,8 @@ class AddAccountModal(ctk.CTkToplevel):
         self._qr_active: bool = False  # флаг работы поллинг-цикла QR
         self._qr = None  # активный telethon QRLogin на временном клиенте
         self._build()
+        if phone:
+            self._phone_entry.set_text(phone)
         self.protocol("WM_DELETE_WINDOW", self._on_cancel)
         show_modal(self, app)
 
@@ -313,12 +317,14 @@ class AddAccountModal(ctk.CTkToplevel):
             getattr(me, "first_name", "") or "",
             getattr(me, "last_name", "") or "",
         ])).strip() or phone
+        # Активным профиль станет после проверки сессии в App (activate).
         self._app._profiles.add_or_update(
             phone=phone,
             api_id=self._app.config.api_id,
             session_string=session_str,
             display_name=display_name,
-            set_active=True,
+            set_active=False,
+            user_id=int(getattr(me, "id", 0) or 0),
         )
         try:
             client.disconnect()

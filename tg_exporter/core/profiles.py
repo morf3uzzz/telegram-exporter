@@ -8,10 +8,14 @@ ProfileManager — управление несколькими Telegram-акка
 {
   "active_phone": "+7999...",
   "profiles": [
-    {"phone": "+7999...", "display_name": "Max", "api_id": "123"},
+    {"phone": "+7999...", "display_name": "Max", "api_id": "123", "user_id": 111},
     ...
   ]
 }
+
+Инвариант: сохранённая сессия профиля авторизует именно аккаунт этого профиля.
+Одна и та же строка сессии не может принадлежать двум профилям (auth-ключ
+привязан ровно к одному пользователю) — см. add_or_update().
 """
 
 from __future__ import annotations
@@ -38,6 +42,9 @@ class Profile:
     # URL-строка прокси для этого аккаунта ("" — без прокси). Несекретная,
     # хранится в profiles.json. Формат разбирается в core/proxy.py.
     proxy: str = ""
+    # Telegram user id владельца — настоящая идентичность аккаунта (номер может
+    # смениться или быть записан с «+» и без). 0 — ещё не известен (старый файл).
+    user_id: int = 0
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -121,9 +128,34 @@ class ProfileManager:
             return self._active_phone
 
     def get(self, phone: str) -> Optional[Profile]:
-        phone = _normalize_phone(phone)
         with self._lock:
-            return next((p for p in self._profiles if p.phone == phone), None)
+            return self._find(phone)
+
+    def find_by_identity(self, user_id: int, phone: str) -> Optional[Profile]:
+        """
+        Профиль, которому принадлежит аккаунт (user_id, phone). Сначала по
+        user_id, затем по номеру — но только если user_id профиля ещё не известен
+        или совпадает (см. profile_matches).
+        """
+        with self._lock:
+            if user_id:
+                found = next((p for p in self._profiles if p.user_id == user_id), None)
+                if found is not None:
+                    return found
+            return next(
+                (p for p in self._profiles if profile_matches(p, user_id, phone)), None
+            )
+
+    def with_session(self) -> list[Profile]:
+        """Профили, в которые можно войти без кода (сессия есть в Keyring)."""
+        return [p for p in self.list() if self.has_session(p)]
+
+    def _find(self, phone: str) -> Optional[Profile]:
+        """Вызывать под self._lock. Номера сравниваются по цифрам («+» не важен)."""
+        digits = _digits(phone)
+        if not digits:
+            return None
+        return next((p for p in self._profiles if _digits(p.phone) == digits), None)
 
     def is_empty(self) -> bool:
         with self._lock:
@@ -138,35 +170,60 @@ class ProfileManager:
         session_string: str,
         display_name: str = "",
         set_active: bool = True,
+        user_id: int = 0,
     ) -> Profile:
-        """Добавляет новый профиль (или обновляет существующий по phone)."""
+        """
+        Добавляет новый профиль или обновляет существующий — того же аккаунта
+        (по user_id) либо с тем же номером.
+
+        Если такая же строка сессии уже записана у ДРУГОГО профиля, там она
+        удаляется: один auth-ключ авторизует ровно одного пользователя, значит
+        чужая копия — устаревший «двойник», через который переключение
+        открывало бы не тот аккаунт.
+        """
         phone = _normalize_phone(phone)
         if not phone:
             raise ValueError("phone required")
         if not api_id:
             raise ValueError("api_id required")
+        with self._lock:
+            existing = self._find_owner(user_id, phone)
+            key_phone = existing.phone if existing is not None else phone
         if session_string:
             self._credentials._require_keyring()  # type: ignore[attr-defined]
-            keyring_set_with_retry("tg_exporter", _session_key(api_id, phone), session_string)
+            keyring_set_with_retry("tg_exporter", _session_key(api_id, key_phone), session_string)
         with self._lock:
-            existing = next((p for p in self._profiles if p.phone == phone), None)
+            existing = self._find_owner(user_id, phone)
             if existing is not None:
                 existing.api_id = api_id
                 if display_name:
                     existing.display_name = display_name
+                if user_id:
+                    existing.user_id = user_id
                 profile = existing
             else:
-                profile = Profile(phone=phone, display_name=display_name or phone, api_id=api_id)
+                profile = Profile(
+                    phone=phone, display_name=display_name or phone,
+                    api_id=api_id, user_id=user_id,
+                )
                 self._profiles.append(profile)
             if set_active or self._active_phone is None:
-                self._active_phone = phone
+                self._active_phone = profile.phone
             self._save()
-            return profile
+        self.drop_session_aliases(profile, session_string)
+        return profile
+
+    def _find_owner(self, user_id: int, phone: str) -> Optional[Profile]:
+        """Вызывать под self._lock. Профиль аккаунта: по user_id, иначе по номеру."""
+        if user_id:
+            found = next((p for p in self._profiles if p.user_id == user_id), None)
+            if found is not None:
+                return found
+        return self._find(phone)
 
     def set_active(self, phone: str) -> Optional[Profile]:
-        phone = _normalize_phone(phone)
         with self._lock:
-            profile = next((p for p in self._profiles if p.phone == phone), None)
+            profile = self._find(phone)
             if profile is None:
                 return None
             self._active_phone = profile.phone
@@ -175,27 +232,66 @@ class ProfileManager:
 
     def remove(self, phone: str) -> bool:
         """Удаляет профиль и его сессию из Keyring."""
-        phone = _normalize_phone(phone)
         with self._lock:
-            profile = next((p for p in self._profiles if p.phone == phone), None)
+            profile = self._find(phone)
             if profile is None:
                 return False
-            self._profiles = [p for p in self._profiles if p.phone != phone]
-            if self._active_phone == phone:
+            self._profiles = [p for p in self._profiles if p is not profile]
+            if self._active_phone == profile.phone:
                 self._active_phone = self._profiles[0].phone if self._profiles else None
             self._save()
-            api_id = profile.api_id
-        self._delete_session(api_id, phone)
-        self._delete_proxy(api_id, phone)
+        self._delete_session(profile.api_id, profile.phone)
+        self._delete_proxy(profile.api_id, profile.phone)
         return True
 
-    def rename(self, phone: str, display_name: str) -> bool:
-        phone = _normalize_phone(phone)
+    def drop_session(self, phone: str) -> bool:
+        """
+        Удаляет из Keyring только сессию профиля; сам профиль остаётся в списке
+        («нужен повторный вход»). Для мёртвых сессий и сессий-«двойников».
+        """
         with self._lock:
-            profile = next((p for p in self._profiles if p.phone == phone), None)
+            profile = self._find(phone)
+        if profile is None:
+            return False
+        self._delete_session(profile.api_id, profile.phone)
+        return True
+
+    def drop_session_aliases(self, owner: Profile, session_string: str) -> None:
+        """Снимает такую же строку сессии со всех профилей, кроме владельца."""
+        if not session_string:
+            return
+        for other in self.list():
+            if _digits(other.phone) == _digits(owner.phone):
+                continue
+            if self.load_session(other) == session_string:
+                logger.warning(
+                    "profiles: одна сессия у двух профилей — снимаю копию у прежнего владельца"
+                )
+                self._delete_session(other.api_id, other.phone)
+
+    def set_identity(self, phone: str, user_id: int, display_name: str = "") -> bool:
+        """Запоминает user_id (и имя) аккаунта после проверки сессии."""
+        with self._lock:
+            profile = self._find(phone)
             if profile is None:
                 return False
-            profile.display_name = display_name or phone
+            changed = False
+            if user_id and profile.user_id != user_id:
+                profile.user_id = user_id
+                changed = True
+            if display_name and profile.display_name != display_name:
+                profile.display_name = display_name
+                changed = True
+            if changed:
+                self._save()
+            return True
+
+    def rename(self, phone: str, display_name: str) -> bool:
+        with self._lock:
+            profile = self._find(phone)
+            if profile is None:
+                return False
+            profile.display_name = display_name or profile.phone
             self._save()
             return True
 
@@ -207,11 +303,11 @@ class ProfileManager:
         {phone}`; в profiles.json пишется только несекретная часть (public_url:
         тип/host/port/username) — для UI-метки и предзаполнения полей.
         """
-        phone = _normalize_phone(phone)
         with self._lock:
-            profile = next((p for p in self._profiles if p.phone == phone), None)
+            profile = self._find(phone)
             if profile is None:
                 return False
+            phone = profile.phone
             full = (proxy or "").strip()
             if not full:
                 profile.proxy = ""
@@ -285,6 +381,9 @@ class ProfileManager:
         except Exception:
             return None
 
+    def has_session(self, profile: Profile) -> bool:
+        return bool(self.load_session(profile))
+
     def save_session(self, profile: Profile, session_string: str) -> None:
         if not session_string or not profile.api_id or not profile.phone:
             return
@@ -303,6 +402,23 @@ class ProfileManager:
                 keyring.delete_password("tg_exporter", key)
         except Exception:
             pass
+
+
+def _digits(phone: str) -> str:
+    return "".join(c for c in (phone or "") if c.isdigit())
+
+
+def profile_matches(profile: Profile, user_id: int, phone: str) -> bool:
+    """
+    Принадлежит ли профиль аккаунту (user_id, phone).
+
+    user_id — истина, когда он известен обеим сторонам. Номер сравнивается
+    только если user_id профиля ещё не записан (профиль из старой версии).
+    """
+    if user_id and profile.user_id:
+        return profile.user_id == user_id
+    digits = _digits(phone)
+    return bool(digits) and _digits(profile.phone) == digits
 
 
 def _normalize_phone(phone: str) -> str:

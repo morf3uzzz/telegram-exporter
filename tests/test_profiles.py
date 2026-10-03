@@ -299,6 +299,105 @@ class TestProfileManager(unittest.TestCase):
         self.assertEqual(p.display_name, "Max")
         self.assertEqual(p.proxy, "")  # дефолт для отсутствующего поля
 
+    # --- идентичность профиля и защита от «склейки» сессий ---
+
+    def test_same_session_cannot_belong_to_two_profiles(self):
+        # Баг: после «Выход» + входа под другим аккаунтом на том же auth_key
+        # строка сессии совпадала с сохранённой у старого профиля → оба профиля
+        # открывали один аккаунт. Auth-ключ привязан ровно к одному пользователю,
+        # поэтому у прежнего владельца строки сессия должна быть снята.
+        self.pm.add_or_update(phone="+71111111111", api_id="42", session_string="shared")
+        self.pm.add_or_update(phone="+72222222222", api_id="42", session_string="shared")
+        a = self.pm.get("+71111111111")
+        b = self.pm.get("+72222222222")
+        self.assertIsNone(self.pm.load_session(a))
+        self.assertEqual(self.pm.load_session(b), "shared")
+        # Профиль-«двойник» остаётся в списке (нужен повторный вход), не исчезает.
+        self.assertEqual(len(self.pm.list()), 2)
+
+    def test_distinct_sessions_are_left_alone(self):
+        self.pm.add_or_update(phone="+71111111111", api_id="42", session_string="s1")
+        self.pm.add_or_update(phone="+72222222222", api_id="42", session_string="s2")
+        self.assertEqual(self.pm.load_session(self.pm.get("+71111111111")), "s1")
+        self.assertEqual(self.pm.load_session(self.pm.get("+72222222222")), "s2")
+
+    def test_drop_session_keeps_profile(self):
+        self.pm.add_or_update(phone="+71111111111", api_id="42", session_string="s1")
+        self.assertTrue(self.pm.drop_session("+71111111111"))
+        p = self.pm.get("+71111111111")
+        self.assertIsNotNone(p)
+        self.assertIsNone(self.pm.load_session(p))
+        self.assertFalse(self.pm.has_session(p))
+
+    def test_has_session(self):
+        p = self.pm.add_or_update(phone="+71111111111", api_id="42", session_string="s1")
+        self.assertTrue(self.pm.has_session(p))
+
+    def test_user_id_persisted(self):
+        self.pm.add_or_update(
+            phone="+71111111111", api_id="42", session_string="s1", user_id=777,
+        )
+        from tg_exporter.core.profiles import ProfileManager
+        pm2 = ProfileManager(self._creds)
+        self.assertEqual(pm2.get("+71111111111").user_id, 777)
+
+    def test_same_user_id_updates_existing_profile_not_duplicate(self):
+        # Тот же аккаунт (user_id) под иначе записанным номером не должен
+        # плодить второй профиль — иначе «удалённый» аккаунт возвращается.
+        self.pm.add_or_update(
+            phone="79991112233", api_id="42", session_string="v1", user_id=777,
+        )
+        self.pm.add_or_update(
+            phone="+79991112233", api_id="42", session_string="v2", user_id=777,
+        )
+        self.assertEqual(len(self.pm.list()), 1)
+        p = self.pm.list()[0]
+        self.assertEqual(self.pm.load_session(p), "v2")
+
+    def test_lookup_ignores_plus_prefix(self):
+        self.pm.add_or_update(phone="79991112233", api_id="42", session_string="s")
+        self.assertIsNotNone(self.pm.get("+79991112233"))
+        self.pm.add_or_update(phone="+79991112233", api_id="42", session_string="s2")
+        self.assertEqual(len(self.pm.list()), 1)
+
+    def test_find_by_identity_prefers_user_id(self):
+        self.pm.add_or_update(
+            phone="+71111111111", api_id="42", session_string="s1", user_id=1,
+        )
+        self.pm.add_or_update(
+            phone="+72222222222", api_id="42", session_string="s2", user_id=2,
+        )
+        found = self.pm.find_by_identity(user_id=2, phone="+71111111111")
+        self.assertEqual(found.phone, "+72222222222")
+        # Без user_id — по номеру.
+        self.assertEqual(self.pm.find_by_identity(user_id=0, phone="71111111111").phone,
+                         "+71111111111")
+        self.assertIsNone(self.pm.find_by_identity(user_id=99, phone="+70000000000"))
+
+    def test_user_id_mismatch_is_not_matched_by_phone(self):
+        # Номер совпал, но user_id у профиля уже известен и он другой —
+        # это другой аккаунт (номер переехал), совпадением не считаем.
+        self.pm.add_or_update(
+            phone="+71111111111", api_id="42", session_string="s1", user_id=1,
+        )
+        self.assertIsNone(self.pm.find_by_identity(user_id=5, phone="+71111111111"))
+
+    def test_with_session_lists_only_loginable_profiles(self):
+        self.pm.add_or_update(phone="+71111111111", api_id="42", session_string="s1")
+        self.pm.add_or_update(phone="+72222222222", api_id="42", session_string="s2")
+        self.pm.drop_session("+71111111111")
+        self.assertEqual([p.phone for p in self.pm.with_session()], ["+72222222222"])
+
+    def test_old_file_without_user_id_loads(self):
+        path = self._fake_home / "profiles.json"
+        path.write_text(json.dumps({
+            "active_phone": "+71111111111",
+            "profiles": [{"phone": "+71111111111", "display_name": "Max", "api_id": "42"}],
+        }), encoding="utf-8")
+        from tg_exporter.core.profiles import ProfileManager
+        pm2 = ProfileManager(self._creds)
+        self.assertEqual(pm2.get("+71111111111").user_id, 0)
+
 
 if __name__ == "__main__":
     unittest.main()

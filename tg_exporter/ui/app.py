@@ -6,6 +6,7 @@ App — главное окно и контроллер приложения.
   - CredentialsManager (keyring)
   - TelegramClientManager (telegram client)
   - AuthService (login flow)
+  - AccountSessions (профиль ↔ сессия ↔ живой клиент)
   - BackgroundWorker (фоновый поток + очередь событий)
   - EventDispatcher (роутинг событий к UI)
   - ExportOrchestrator (логика экспорта)
@@ -36,6 +37,7 @@ from ..core.client import TelegramClientManager
 from ..core.auth import AuthService, AuthStep, QrNeedsPassword
 from ..core.orchestrator import ExportOrchestrator
 from ..core.profiles import ProfileManager, Profile
+from ..core.account_session import AccountSessions
 from ..core import forum
 from ..core.chat_kind import chat_kind, KIND_ORDER
 from ..core.export_queue import ExportQueue, build_topic_jobs
@@ -51,6 +53,11 @@ try:
     _TELETHON_OK = True
 except ImportError:
     _TELETHON_OK = False
+
+
+# Payload события login_success для автовхода: профиль уже сверен с сессией,
+# сохранять его заново (и тем более создавать) не нужно.
+_RESTORED = "restored"
 
 
 class App(ctk.CTk):
@@ -84,6 +91,11 @@ class App(ctk.CTk):
         self._client_mgr = TelegramClientManager(self.config, self.credentials)
         self._profiles = ProfileManager(self.credentials)
         self._auth = AuthService(self._client_mgr)
+        self._accounts = AccountSessions(
+            self._client_mgr, self._profiles, self.credentials,
+            get_api_id=lambda: self.config.api_id,
+            set_api_id=self._use_api_id,
+        )
         self._history = ExportHistory()
         self._worker = BackgroundWorker()
         self._dispatcher = EventDispatcher()
@@ -100,6 +112,8 @@ class App(ctk.CTk):
         self._custom_date_from: Optional[datetime.datetime] = None
         self._custom_date_to: Optional[datetime.datetime] = None
         self._active_export_modal: Optional[ExportModal] = None
+        # Идёт ли экспорт одного чата (между submit и done/error/cancelled).
+        self._export_running: bool = False
         # Временный прокси для входа (до создания профиля). Применяется к клиенту
         # на send_code и переносится в профиль после успешного логина.
         self._pending_proxy: str = ""
@@ -214,10 +228,9 @@ class App(ctk.CTk):
             self._worker.submit(self._bg_check_session)
 
     def _has_any_session(self) -> bool:
-        """Есть ли хоть одна сохранённая сессия — активный профиль или дефолтная."""
-        active = self._profiles.active()
-        if active and self._profiles.load_session(active):
-            return True
+        """Есть ли во что входить без кода: профиль с сессией либо старый одиночный ключ."""
+        if not self._profiles.is_empty():
+            return bool(self._profiles.with_session())
         return bool(self.credentials.load_session(self.config.api_id))
 
     def _show_shell(self) -> None:
@@ -258,9 +271,10 @@ class App(ctk.CTk):
         self._show_shell()
         self._show_page("help")
 
-    def show_add_account(self) -> None:
+    def show_add_account(self, phone: str = "") -> None:
+        """`phone` — повторный вход в существующий профиль (поле номера заполнено)."""
         from .views.add_account_modal import AddAccountModal
-        AddAccountModal(self)
+        AddAccountModal(self, phone=phone)
 
     def show_proxy_settings(self, phone: str) -> None:
         from .views.proxy_modal import ProxyModal
@@ -325,6 +339,19 @@ class App(ctk.CTk):
         self._worker.submit(self._bg_verify_code, code, password)
 
     def logout(self) -> None:
+        """«Выход»: завершает сессию активного аккаунта и убирает его из списка."""
+        if self._account_change_blocked():
+            return
+        import tkinter.messagebox as mb
+        active = self._profiles.active()
+        who = f" «{active.display_name or active.phone}»" if active else ""
+        if not mb.askyesno(
+            "Выход",
+            f"Выйти из аккаунта{who}?\n\n"
+            "Сессия на этом устройстве будет завершена, аккаунт исчезнет из списка. "
+            "Чтобы вернуть его, понадобится войти заново.",
+        ):
+            return
         self._worker.submit(self._bg_logout)
 
     # ---- QR-вход ----
@@ -479,6 +506,7 @@ class App(ctk.CTk):
         orch = ExportOrchestrator(self._client_mgr, self.config, self._history, deepgram_key)
         token = self._token
 
+        self._export_running = True
         self._worker.submit(
             orch.run, dialog, task, token, progress,
             lambda etype, payload: self._worker.put_event(etype, payload),
@@ -605,57 +633,57 @@ class App(ctk.CTk):
 
     def switch_profile(self, phone: str) -> None:
         """Переключается на указанный профиль — без повторного ввода кода."""
+        if self._account_change_blocked():
+            return
         profile = self._profiles.get(phone)
         if profile is None:
             return
         self._worker.submit(self._bg_switch_profile, profile)
 
     def remove_profile(self, phone: str) -> None:
-        """Удаляет профиль. Если это был активный — переключает на первый из оставшихся или показывает логин."""
-        was_active = (self._profiles.active_phone() == phone)
-        self._profiles.remove(phone)
-        if not was_active:
+        """
+        Удаляет профиль. Активный — это выход из аккаунта (сессия завершается),
+        после него активным становится следующий аккаунт или показывается вход.
+        """
+        if self._account_change_blocked():
             return
-        next_profile = self._profiles.active()
-        if next_profile is None:
-            # Последний профиль — полный logout
-            self._worker.submit(self._bg_logout)
-        else:
-            self._worker.submit(self._bg_switch_profile, next_profile)
+        self._worker.submit(self._bg_remove_profile, phone)
 
-    def save_active_profile_session(self, phone: Optional[str] = None, display_name: str = "") -> None:
-        """Сохраняет текущую сессию клиента в профиль (вызывается после успешного логина)."""
+    def _account_change_blocked(self) -> bool:
+        """
+        Смена аккаунта посреди экспорта подменила бы клиент под уже выбранными
+        чатами (их объекты привязаны к прежнему аккаунту) — не даём.
+        """
+        if not self._export_busy():
+            return False
+        import tkinter.messagebox as mb
+        mb.showinfo("Идёт экспорт", "Дождитесь завершения экспорта или отмените его.")
+        return True
+
+    def _export_busy(self) -> bool:
+        return self._export_running or self._folder_active or self._topic_active
+
+    def _use_api_id(self, api_id: str) -> None:
+        """api_id профиля отличается от текущего — переводим конфиг и клиент на него."""
+        self.config = self.config.with_api_id(api_id)
+        self.config.save()
+        self._client_mgr.update_config(self.config)
+
+    def _bg_remember_login(self) -> None:
+        """После входа по коду/QR: сохраняет сессию в профиль вошедшего аккаунта."""
         try:
-            client = self._client_mgr.get_client()
-            session_str = client.session.save() or ""
-            if not session_str:
+            profile = self._accounts.remember_login()
+            if profile is None:
+                logger.warning("remember_login: клиент не авторизован, профиль не сохранён")
                 return
-            phone = phone or ""
-            if not phone:
-                try:
-                    me = client.get_me()
-                    phone = "+" + str(getattr(me, "phone", "") or "")
-                    if not display_name:
-                        display_name = " ".join(filter(None, [
-                            getattr(me, "first_name", "") or "",
-                            getattr(me, "last_name", "") or "",
-                        ])).strip()
-                except Exception:
-                    pass
-            if not phone or phone == "+":
-                return
-            self._profiles.add_or_update(
-                phone=phone, api_id=self.config.api_id,
-                session_string=session_str,
-                display_name=display_name, set_active=True,
-            )
-            # Переносим временный прокси входа в созданный профиль, чтобы он
-            # сохранился между запусками (а не жил только в памяти сессии).
+            # Переносим временный прокси входа в профиль, чтобы он сохранился
+            # между запусками (а не жил только в памяти сессии).
             if self._pending_proxy:
-                self._profiles.set_proxy(phone, self._pending_proxy)
+                self._profiles.set_proxy(profile.phone, self._pending_proxy)
                 self._pending_proxy = ""
+            self._worker.put_event("profiles_changed", None)
         except Exception as exc:
-            logger.error("save_active_profile_session failed", exc=exc)
+            logger.error("remember_login failed", exc=exc)
 
     # ---- Transcription settings ----
 
@@ -685,52 +713,38 @@ class App(ctk.CTk):
 
     def _bg_check_session(self) -> None:
         """
-        Автовход: восстанавливает сохранённую сессию активного профиля.
-        Устойчив к сбоям прокси — если коннект через прокси не прошёл, но
-        сессия валидна, пробует БЕЗ прокси (юзер мог включить VPN/выйти из РФ).
+        Автовход: восстанавливает сохранённую сессию (активный профиль, затем
+        остальные) и сверяет, что она принадлежит именно этому профилю.
         Любая ошибка не «съедается» молча — пользователь получает сообщение.
         """
         try:
-            active = self._profiles.active()
-            session_str = None
-            proxy_url = ""
-            if active:
-                proxy_url = self._profiles.load_proxy(active) or ""
-                session_str = self._profiles.load_session(active)
-                if session_str and active.api_id and active.api_id != self.config.api_id:
-                    self.config = self.config.with_api_id(active.api_id)
-                    self.config.save()
-                    self._client_mgr.update_config(self.config)
-
-            # Попытка 1: с прокси профиля (если задан).
-            self._client_mgr.use_proxy(proxy_url)
-            if session_str:
-                self._client_mgr.use_session(session_str)
-            result = self._auth.check_session()
-            if result.step == AuthStep.SUCCESS:
-                self._worker.put_event("login_success", None)
-                return
-
-            # Попытка 2 (fallback): если был прокси и сессия валидна — пробуем
-            # без прокси (прокси мог умереть, а Telegram доступен напрямую).
-            if proxy_url and session_str:
-                self._client_mgr.use_proxy("")
-                self._client_mgr.use_session(session_str)
-                result2 = self._auth.check_session()
-                if result2.step == AuthStep.SUCCESS:
-                    self._worker.put_event("login_success", None)
-                    return
-                # Не вышло и без прокси — сообщаем, но не блокируем вход.
-                self._worker.put_event(
-                    "login_error",
-                    "Автовход не удался (прокси недоступен?). Войдите заново или проверьте прокси.",
-                )
-            # Без прокси — остаёмся на экране входа (сессия устарела/нет).
+            res = self._accounts.restore()
         except Exception as exc:
             logger.error("check_session (автовход) failed", exc=exc)
             self._worker.put_event("login_error", "Автовход не удался. Войдите заново.")
+            return
+        if res.ok:
+            self._worker.put_event("login_success", _RESTORED)
+        elif res.message:
+            self._worker.put_event("login_error", res.message)
 
     def _bg_send_code(self, phone: str) -> None:
+        # Номер сохранённого аккаунта → входим по его сессии, без кода. Любой
+        # другой — только на чистом auth-ключе (см. core/account_session.py).
+        try:
+            restored = self._accounts.begin_phone_login(phone)
+        except Exception as exc:
+            logger.error("begin_phone_login failed", exc=exc)
+            self._worker.put_event("login_error", "Не удалось начать вход. Попробуйте ещё раз.")
+            return
+        if restored is not None:
+            if restored.ok:
+                self._worker.put_event("login_success", _RESTORED)
+            else:
+                self._worker.put_event("login_error", restored.message or "Ошибка")
+            return
+        if self._pending_proxy:
+            self._client_mgr.use_proxy(self._pending_proxy)
         result = self._auth.send_code(phone)
         if result.step == AuthStep.SUCCESS:
             self._worker.put_event("login_success", None)
@@ -753,6 +767,7 @@ class App(ctk.CTk):
         try:
             # Прокси для входа (как и для входа по номеру) — до создания профиля.
             self._client_mgr.use_proxy(self._pending_proxy)
+            self._accounts.begin_qr_login()
             url = self._auth.start_qr()
             self._worker.put_event("qr_ready", url)
             self._qr_poll_loop()
@@ -818,35 +833,41 @@ class App(ctk.CTk):
 
     def _bg_logout(self) -> None:
         self._qr_active = False
-        self._auth.logout()
-        if self.config.api_id:
-            self.credentials.delete_session(self.config.api_id)
-        self._worker.put_event("logout_done", None)
+        try:
+            next_profile = self._accounts.sign_out_active(self._auth.logout)
+        except Exception as exc:
+            logger.error("logout failed", exc=exc)
+            next_profile = None
+        if next_profile is not None:
+            self._worker.put_event("profile_switched", next_profile)
+        else:
+            self._worker.put_event("logout_done", None)
+
+    def _bg_remove_profile(self, phone: str) -> None:
+        profile = self._profiles.get(phone)
+        active = self._profiles.active()
+        if profile is not None and active is not None and active.phone == profile.phone:
+            self._bg_logout()
+            return
+        if profile is not None:
+            self._profiles.remove(profile.phone)
+        self._worker.put_event("profiles_changed", None)
 
     def _bg_switch_profile(self, profile: Profile) -> None:
-        """Переключает активную сессию клиента на профиль (в фоне)."""
+        """Переключает клиент на аккаунт профиля (в фоне), с проверкой и откатом."""
         try:
-            self._client_mgr.disconnect()
-            session_str = self._profiles.load_session(profile)
-            if not session_str:
-                self._worker.put_event("error", f"Сессия профиля {profile.phone} не найдена. Войдите заново.")
-                return
-            self._profiles.set_active(profile.phone)
-            # Убеждаемся, что api_id клиента соответствует профилю.
-            if profile.api_id and profile.api_id != self.config.api_id:
-                self.config = self.config.with_api_id(profile.api_id)
-                self.config.save()
-                self._client_mgr.update_config(self.config)
-            self._client_mgr.use_proxy(self._profiles.load_proxy(profile))
-            self._client_mgr.use_session(session_str)
-            client = self._client_mgr.ensure_connected()
-            if not client.is_user_authorized():
-                self._worker.put_event("error", f"Сессия {profile.phone} устарела. Удалите профиль и войдите заново.")
-                return
-            self._worker.put_event("profile_switched", profile)
+            res = self._accounts.activate(profile)
         except Exception as exc:
             logger.error("switch_profile failed", exc=exc)
-            self._worker.put_event("error", f"Не удалось переключиться: {exc}")
+            self._worker.put_event("profiles_changed", None)
+            self._worker.put_event("error", "Не удалось переключить аккаунт. Попробуйте ещё раз.")
+            return
+        if res.ok:
+            self._worker.put_event("profile_switched", res.profile)
+            return
+        logger.warning(f"switch_profile: {profile.phone} — {res.outcome.name}")
+        self._worker.put_event("profiles_changed", None)
+        self._worker.put_event("error", res.message or "Не удалось переключить аккаунт.")
 
     def _bg_test_proxy(self, modal, proxy_url: str) -> None:
         """Проверка прокси через временный клиент. Не трогает активную сессию."""
@@ -964,8 +985,9 @@ class App(ctk.CTk):
         d.on("qr_2fa_retry",     lambda msg: self.login_view.on_qr_2fa_retry(msg or "Неверный пароль 2FA"))
         d.on("qr_expired",       lambda _: self.login_view.on_qr_expired())
         d.on("qr_error",         lambda msg: self.login_view.on_qr_error(msg or "Ошибка QR"))
-        d.on("logout_done",      lambda _: self.show_login())
+        d.on("logout_done",      self._on_logout_done)
         d.on("profile_switched", self._on_profile_switched)
+        d.on("profiles_changed", lambda _: self.accounts_page.refresh())
 
         d.on("add_account_code_sent", self._on_add_account_code_sent)
         d.on("add_account_2fa",       self._on_add_account_2fa)
@@ -1002,10 +1024,26 @@ class App(ctk.CTk):
 
     # ---- Event handlers ----
 
-    def _on_login_success(self, _payload) -> None:
-        # Сохраняем успешный логин в профили (миграция + новые аккаунты)
-        self._worker.submit(self.save_active_profile_session)
+    def _on_login_success(self, payload) -> None:
+        # Вход по коду/QR — записываем профиль вошедшего аккаунта. Автовход
+        # профили не трогает: иначе он «возвращал» бы удалённые аккаунты.
+        if payload != _RESTORED:
+            self._worker.submit(self._bg_remember_login)
+        self._reset_account_view()
         self.show_chats()
+
+    def _on_logout_done(self, _payload) -> None:
+        self._reset_account_view()
+        self.show_login()
+
+    def _reset_account_view(self) -> None:
+        """Чаты и папки принадлежат аккаунту — при его смене старые убираем."""
+        self._all_dialogs = []
+        self._folder_peers = {}
+        self._folder_filters = {}
+        self._folder_excludes = {}
+        self._current_folder = "Все чаты"
+        self.chats_page.set_folders([])
 
     def _on_add_account_code_sent(self, payload) -> None:
         modal, _ = payload
@@ -1028,8 +1066,11 @@ class App(ctk.CTk):
         except Exception:
             pass
         profile = self._profiles.get(phone)
-        if profile is not None:
+        if profile is not None and not self._export_busy():
             self._worker.submit(self._bg_switch_profile, profile)
+        else:
+            # Идёт экспорт — клиент не трогаем, аккаунт просто появится в списке.
+            self.accounts_page.refresh()
 
     def _on_add_account_error(self, payload) -> None:
         modal, message = payload
@@ -1101,10 +1142,7 @@ class App(ctk.CTk):
     def _on_profile_switched(self, profile: Profile) -> None:
         # Обновляем список чатов под новый аккаунт + карточки аккаунтов
         # (пометка «активный»), затем показываем страницу «Чаты».
-        self._all_dialogs = []
-        self._folder_peers = {}
-        self._folder_filters = {}
-        self._folder_excludes = {}
+        self._reset_account_view()
         self.accounts_page.refresh()
         self.show_chats()
 
@@ -1162,6 +1200,7 @@ class App(ctk.CTk):
         import os
         import shutil
         export_dir, files = payload
+        self._export_running = False
         # Топик-пакет: ведём к следующему топику, финал покажет topic_done.
         if self._topic_active:
             self._topic_queue.record(True)
@@ -1191,6 +1230,7 @@ class App(ctk.CTk):
             self._export_next_in_folder()
 
     def _on_export_error(self, msg: str) -> None:
+        self._export_running = False
         if self._topic_active:
             self._topic_queue.record(False)
             self._export_next_topic()
@@ -1202,6 +1242,7 @@ class App(ctk.CTk):
             self._export_next_in_folder()
 
     def _on_export_cancelled(self, _) -> None:
+        self._export_running = False
         if self._active_export_modal:
             self._active_export_modal.on_export_cancelled()
         self._folder_active = False
