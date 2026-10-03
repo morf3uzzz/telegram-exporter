@@ -15,6 +15,7 @@ import shutil
 import subprocess
 import tempfile
 import time
+import unicodedata
 from dataclasses import dataclass
 from typing import Optional
 
@@ -293,6 +294,9 @@ def media_file_stem(msg) -> str:
         return stem
     # Имя приходит от отправителя: берём только последний сегмент пути и
     # оставляем буквы/цифры/«_»/«-» — без пробелов, точек и разделителей.
+    # NFC: macOS отдаёт имена разложенными («й» = «и» + знак), и отдельный
+    # знак иначе вычищался бы как небуквенный символ.
+    original = unicodedata.normalize("NFC", original)
     base, ext = os.path.splitext(original.replace("\\", "/").rsplit("/", 1)[-1])
     base = _UNSAFE_NAME_CHARS.sub("_", base).strip("_")[:_ORIGINAL_NAME_MAX].rstrip("_")
     if base:

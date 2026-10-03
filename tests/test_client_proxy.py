@@ -154,5 +154,21 @@ class TestFreshSession(unittest.TestCase):
         self.assertEqual(mgr._session_override, "REAL_SESSION")
 
 
+class TestPinSession(unittest.TestCase):
+    """pin_session: клиент после входа помнит свою сессию при пересоздании."""
+
+    def test_pin_replaces_fresh_marker_without_dropping_client(self):
+        from tg_exporter.core.client import FRESH_SESSION
+        mgr = _make_manager()
+        mgr.use_fresh_session()
+        client = mgr.get_client()
+        self.assertEqual(mgr._session_override, FRESH_SESSION)
+
+        mgr.pin_session(client.session.save() or "pinned")
+
+        self.assertNotEqual(mgr._session_override, FRESH_SESSION)
+        self.assertIs(mgr.get_client(), client)  # живой клиент не пересоздан
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -67,6 +67,15 @@ class TestMediaFileStem(unittest.TestCase):
         stem = media_file_stem(_named(12, "archive.tar gz!"))
         self.assertNotIn(".", stem)
 
+    def test_decomposed_unicode_name_is_composed(self):
+        # macOS отдаёт имена в NFD: «й» = «и» + отдельный знак. Без нормализации
+        # знак выбрасывался и имя портилось («Договор» → «Договор» без «й»).
+        import unicodedata
+        nfd = unicodedata.normalize("NFD", "Отчёт май.pdf")
+        self.assertEqual(
+            media_file_stem(_named(12, nfd)), "2026-01-02_03-04-05_msg12_Отчёт_май.pdf",
+        )
+
     def test_missing_date_falls_back_to_id(self):
         self.assertEqual(media_file_stem(_named(12, date=None)), "msg12")
 
@@ -210,6 +219,15 @@ class TestConverterAlbumId(unittest.TestCase):
     def test_no_album_no_grouped_id(self):
         from tg_exporter.core.converter import message_to_export
         self.assertIsNone(message_to_export(_Photo(1)).grouped_id)
+
+    def test_link_preview_image_is_not_message_media(self):
+        # Telethon отдаёт картинку превью ссылки как message.photo. Это не
+        # вложение автора: иначе под каждым постом со ссылкой стояло бы «📎 Фото».
+        from telethon.tl.types import MessageMediaWebPage, WebPageEmpty
+        from tg_exporter.core.converter import message_to_export
+        m = _Photo(1, "смотри https://example.com")
+        m.media = MessageMediaWebPage(webpage=WebPageEmpty(id=1))
+        self.assertIsNone(message_to_export(m).media_type)
 
     def test_non_integer_grouped_id_is_ignored(self):
         # MagicMock-сообщения в тестах оркестратора отдают mock на любой атрибут.

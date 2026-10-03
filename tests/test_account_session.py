@@ -41,6 +41,8 @@ class _FakeTelegram:
         self.keys: dict[str, object] = {}
         self.offline = False
         self.dead_proxies: set[str] = set()
+        self.direct_blocked = False          # без прокси Telegram недоступен
+        self.duplicated_keys: set[str] = set()  # AUTH_KEY_DUPLICATED
         self._seq = 0
 
     def new_key(self) -> str:
@@ -60,6 +62,9 @@ class _FakeClient:
         self.session = SimpleNamespace(save=lambda: self._key)
 
     def get_me(self):
+        if self._key in self._server.duplicated_keys:
+            from telethon.errors import AuthKeyDuplicatedError
+            raise AuthKeyDuplicatedError(request=None)
         # Telethon: get_me() → None, если ключ не авторизован.
         return self._server.keys.get(self._key)
 
@@ -98,6 +103,10 @@ class _FakeClientManager:
         self.proxy = proxy or None
         self._client = None
 
+    def pin_session(self, session_string) -> None:
+        # Как в TelegramClientManager: запоминает сессию, живой клиент не трогает.
+        self._session = session_string or _FRESH
+
     def get_client(self) -> _FakeClient:
         if self._client is None:
             key = self._server.new_key() if self._session is _FRESH else self._session
@@ -105,7 +114,11 @@ class _FakeClientManager:
         return self._client
 
     def ensure_connected(self) -> _FakeClient:
-        if self._server.offline or (self.proxy and self.proxy in self._server.dead_proxies):
+        if (
+            self._server.offline
+            or (self.proxy and self.proxy in self._server.dead_proxies)
+            or (self._server.direct_blocked and not self.proxy)
+        ):
             raise ConnectionError("Connection to Telegram failed")
         return self.get_client()
 
@@ -278,6 +291,19 @@ class TestSwitch(_Base):
         self.assertEqual(self.pm.active_phone(), "+71111111111")
         self.assertEqual(self.mgr.live_user().id, self.alice.id)
 
+    def test_failed_switch_restores_api_id(self):
+        self._login(self.alice)
+        key = self.tg.new_key()
+        self.tg.keys[key] = self.bob
+        self.pm.add_or_update(
+            phone="+72222222222", api_id="77", session_string=key, set_active=False,
+        )
+        self.tg.offline = True
+
+        self.accounts.activate(self.pm.get("+72222222222"))
+
+        self.assertEqual(self.api_id, "42")
+
     def test_switch_backfills_user_id(self):
         self._login(self.alice)
         key = self.tg.new_key()
@@ -369,6 +395,114 @@ class TestLogoutThenLoginAnotherAccount(_Base):
 
         self.assertIsNone(res)
         self.assertIsNone(self.mgr.live_user())  # чистый ключ, никто не вошёл
+
+
+class TestAfterInteractiveLogin(_Base):
+
+    def test_client_rebuild_after_login_keeps_the_account(self):
+        # Сохранение прокси активного аккаунта пересоздаёт клиент (use_proxy).
+        # После входа по коду клиент не должен «забывать» сессию и строиться
+        # на новом пустом ключе.
+        self.accounts.begin_phone_login("+71111111111")
+        self._login(self.alice)
+
+        self.mgr.use_proxy("")
+
+        self.assertEqual(self.mgr.live_user().id, self.alice.id)
+
+    def test_client_rebuild_after_qr_login_keeps_the_account(self):
+        self.accounts.begin_qr_login()
+        self._login(self.alice)
+
+        self.mgr.use_proxy("")
+
+        self.assertEqual(self.mgr.live_user().id, self.alice.id)
+
+    def test_client_rebuild_after_legacy_migration_keeps_the_account(self):
+        key = self.tg.new_key()
+        self.tg.keys[key] = self.alice
+        self.kr.store[("tg_exporter", "42:session")] = key
+        self._restart()
+
+        self.mgr.use_proxy("")
+
+        self.assertEqual(self.mgr.live_user().id, self.alice.id)
+
+
+class TestLoginScreenProxy(_Base):
+    """РФ без VPN: сохранённый прокси умер, новый введён на экране входа."""
+
+    def _saved_account_behind_dead_proxy(self):
+        self._login(self.alice)
+        self.pm.set_proxy("+71111111111", "socks5://old:1080")
+        self.tg.dead_proxies.add("socks5://old:1080")
+        self.tg.direct_blocked = True
+        self.assertIs(self._restart().outcome, self.Outcome.FAILED)
+
+    def test_typed_phone_restores_through_login_screen_proxy(self):
+        self._saved_account_behind_dead_proxy()
+
+        res = self.accounts.begin_phone_login("+71111111111", proxy="socks5://new:1080")
+
+        self.assertIsNotNone(res)
+        self.assertTrue(res.ok)
+        self.assertEqual(self.mgr.proxy, "socks5://new:1080")
+        self.assertEqual(self.mgr.live_user().id, self.alice.id)
+        # Рабочий прокси становится прокси профиля — следующий запуск пройдёт сам.
+        self.assertEqual(self.pm.load_proxy(self.pm.get("+71111111111")), "socks5://new:1080")
+        self.assertTrue(self._restart().ok)
+
+    def test_working_stored_proxy_is_not_replaced(self):
+        self._login(self.alice)
+        self.pm.set_proxy("+71111111111", "socks5://old:1080")
+        self.tg.dead_proxies.add("socks5://bad:1080")
+        self.tg.offline = True
+        self._restart()
+        self.tg.offline = False
+
+        res = self.accounts.begin_phone_login("+71111111111", proxy="socks5://bad:1080")
+
+        self.assertTrue(res.ok)
+        self.assertEqual(self.pm.load_proxy(self.pm.get("+71111111111")), "socks5://old:1080")
+
+    def test_unreachable_saved_account_falls_back_to_code_login(self):
+        # Раньше — тупик: «не удалось подключиться» и код не отправлялся никогда.
+        self._login(self.alice)
+        key = self._session_of("+71111111111")
+        self.tg.offline = True
+        self._restart()
+
+        res = self.accounts.begin_phone_login("+71111111111")
+
+        self.assertIsNone(res)                                  # можно слать код
+        self.assertEqual(self._session_of("+71111111111"), key)  # сессия не тронута
+        self.tg.offline = False
+        self.assertIsNone(self.mgr.live_user())                 # вход — на чистом ключе
+
+
+class TestDeadAuthKey(_Base):
+
+    def test_duplicated_auth_key_is_treated_as_dead(self):
+        # AUTH_KEY_DUPLICATED — ключ аннулирован сервером навсегда. Это не «нет
+        # сети»: автовход должен перейти к следующему аккаунту, а не застрять.
+        self._login(self.alice)
+        self._add_via_modal(self.bob)
+        self.tg.duplicated_keys.add(self._session_of("+71111111111"))
+
+        res = self._restart()
+
+        self.assertTrue(res.ok)
+        self.assertEqual(self.pm.active_phone(), "+72222222222")
+        self.assertIsNone(self._session_of("+71111111111"))
+
+    def test_duplicated_auth_key_does_not_block_code_login(self):
+        self._login(self.alice)
+        self.tg.duplicated_keys.add(self._session_of("+71111111111"))
+        self._restart()
+
+        self.assertIsNone(self.accounts.begin_phone_login("+71111111111"))
+        self._login(self.alice)
+        self.assertEqual(self.mgr.live_user().id, self.alice.id)
 
 
 class TestSignOut(_Base):
@@ -547,6 +681,33 @@ class TestRestore(_Base):
         self.assertEqual(self._phones(), ["+71111111111"])
         self.assertEqual(self._session_of("+71111111111"), key)
         self.assertNotIn(("tg_exporter", "42:session"), self.kr.store)
+
+    def test_restore_hands_session_to_owner_tried_earlier(self):
+        # Активный Bob без сессии (пробуется первым), а его сессия лежит у Alice.
+        self._login(self.bob)
+        shared = self._session_of("+72222222222")
+        self.pm.add_or_update(
+            phone="+71111111111", api_id=self.api_id, session_string="tmp",
+            display_name="Alice", set_active=False,
+        )
+        self.pm.drop_session("+72222222222")
+        self.kr.store[("tg_exporter", "42:session:+71111111111")] = shared
+
+        res = self._restart()
+
+        self.assertTrue(res.ok)
+        self.assertEqual(res.profile.phone, "+72222222222")
+        self.assertEqual(self.mgr.live_user().id, self.bob.id)
+
+    def test_dead_legacy_session_is_forgotten(self):
+        key = self.tg.new_key()  # ключ есть, но никем не авторизован
+        self.kr.store[("tg_exporter", "42:session")] = key
+
+        res = self._restart()
+
+        self.assertFalse(res.ok)
+        self.assertNotIn(("tg_exporter", "42:session"), self.kr.store)
+        self.assertEqual(self.pm.list(), [])
 
     def test_restore_with_nothing_saved_is_silent(self):
         res = self._restart()

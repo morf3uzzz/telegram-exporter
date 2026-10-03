@@ -24,6 +24,8 @@ from dataclasses import dataclass
 from enum import Enum, auto
 from typing import Callable, Optional
 
+from telethon.errors import AuthKeyError
+
 from .client import TelegramClientManager
 from .credentials import CredentialsManager
 from .profiles import Profile, ProfileManager, profile_matches
@@ -109,6 +111,8 @@ class AccountSessions:
             if res.outcome is not Outcome.NO_SESSION:
                 message = "Сохранённая сессия больше не действует. Войдите заново."
             if res.owner is not None:
+                # Владельцу только что досталась сессия — пробуем его (снова).
+                tried.discard(res.owner.phone)
                 queue.insert(0, res.owner)
 
         self._client.use_fresh_session()
@@ -158,21 +162,22 @@ class AccountSessions:
 
     # ---- Интерактивный вход ----
 
-    def begin_phone_login(self, phone: str) -> Optional[ApplyResult]:
+    def begin_phone_login(self, phone: str, proxy: str = "") -> Optional[ApplyResult]:
         """
-        Вызывать перед отправкой кода с экрана входа.
+        Вызывать перед отправкой кода с экрана входа. `proxy` — прокси,
+        введённый на экране входа (если есть).
 
-        Если для введённого номера есть сохранённая сессия — пробует войти по
-        ней (код не нужен) и возвращает результат. Иначе переводит клиент на
-        чистый auth-ключ и возвращает None — можно отправлять код.
+        Если для введённого номера есть рабочая сохранённая сессия — входит по
+        ней (код не нужен) и возвращает результат. Во всех остальных случаях
+        переводит клиент на чистый auth-ключ и возвращает None — можно
+        отправлять код. Тупика «не удалось подключиться» здесь нет: если сети
+        действительно нет, об этом скажет сама отправка кода.
         """
         profile = self._profiles.get(phone)
         if profile is not None and self._profiles.has_session(profile):
-            res = self._apply(profile, allow_direct_fallback=True)
+            res = self._apply(profile, allow_direct_fallback=True, extra_proxy=proxy)
             if res.ok:
                 self._profiles.set_active(profile.phone)
-                return res
-            if res.outcome is Outcome.FAILED:
                 return res
         self._client.use_fresh_session()
         return None
@@ -253,11 +258,19 @@ class AccountSessions:
 
     # ---- Internal ----
 
-    def _apply(self, profile: Profile, allow_direct_fallback: bool = False) -> ApplyResult:
+    def _apply(
+        self,
+        profile: Profile,
+        allow_direct_fallback: bool = False,
+        extra_proxy: str = "",
+    ) -> ApplyResult:
         """
         Направляет клиент на сессию профиля и проверяет, чей это аккаунт.
         Активный профиль НЕ меняет и клиент при неудаче НЕ откатывает — это
         делают вызывающие.
+
+        `extra_proxy` — прокси с экрана входа: пробуется после сохранённого и,
+        если подключиться удалось только через него, становится прокси профиля.
         """
         name = profile.display_name or profile.phone
         session = self._profiles.load_session(profile)
@@ -271,25 +284,37 @@ class AccountSessions:
             self._set_api_id(profile.api_id)
 
         proxy = self._profiles.load_proxy(profile) or ""
+        attempts = [proxy]
+        if extra_proxy and extra_proxy != proxy:
+            attempts.append(extra_proxy)
         # Прокси мог умереть, а Telegram быть доступен напрямую (VPN) — на
         # автовходе пробуем и без него.
-        attempts = [proxy, ""] if (proxy and allow_direct_fallback) else [proxy]
+        if allow_direct_fallback and "" not in attempts:
+            attempts.append("")
         identity: Optional[Identity] = None
         connected = False
+        used_proxy = proxy
         for attempt in attempts:
             self._client.use_proxy(attempt)
             self._client.use_session(session)
             try:
                 identity = self.identify()
-                connected = True
-                break
+            except AuthKeyError as exc:
+                # 406 (AUTH_KEY_DUPLICATED и т.п.): сервер аннулировал ключ
+                # навсегда. Это не сбой сети — сессия мертва, как при 401.
+                logger.warning(f"accounts: ключ {_tag(profile)} аннулирован ({type(exc).__name__})")
+                identity = None
             except Exception as exc:
-                logger.error(f"accounts: не удалось подключиться для {profile.phone}", exc=exc)
+                logger.error(f"accounts: не удалось подключиться для {_tag(profile)}", exc=exc)
+                continue
+            connected = True
+            used_proxy = attempt
+            break
         if not connected:
             return ApplyResult(Outcome.FAILED, profile=profile, message=_CONNECT_FAILED)
 
         if identity is None:
-            logger.warning(f"accounts: сессия {profile.phone} отозвана — снимаю")
+            logger.warning(f"accounts: сессия {_tag(profile)} не действует — снимаю")
             self._profiles.drop_session(profile.phone)
             return ApplyResult(
                 Outcome.UNAUTHORIZED, profile=profile,
@@ -303,13 +328,16 @@ class AccountSessions:
 
         self._profiles.set_identity(profile.phone, identity.user_id, identity.display_name)
         self._profiles.drop_session_aliases(profile, session)
+        if extra_proxy and used_proxy == extra_proxy:
+            # Сохранённый прокси не сработал, а введённый на экране входа — да.
+            self._profiles.set_proxy(profile.phone, extra_proxy)
         return ApplyResult(Outcome.OK, profile=self._profiles.get(profile.phone) or profile)
 
     def _disarm_foreign(
         self, profile: Profile, identity: Identity, session: str, name: str,
     ) -> ApplyResult:
         """Сессия профиля авторизует другой аккаунт: снимаем её с этого профиля."""
-        logger.warning(f"accounts: сессия профиля {profile.phone} принадлежит другому аккаунту — снимаю")
+        logger.warning(f"accounts: сессия профиля {_tag(profile)} принадлежит другому аккаунту — снимаю")
         owner = self._profiles.find_by_identity(identity.user_id, identity.phone)
         if owner is not None and owner.phone == profile.phone:
             owner = None
@@ -332,6 +360,8 @@ class AccountSessions:
             session_string=session, display_name=identity.display_name,
             set_active=True, user_id=identity.user_id,
         )
+        # Вход шёл на «чистой» сессии — закрепляем за клиентом сохранённую.
+        self._client.pin_session(session)
         self._forget_default_session()
         return profile
 
@@ -341,6 +371,8 @@ class AccountSessions:
         if not session:
             self._client.use_fresh_session()
             return
+        if profile.api_id and profile.api_id != self._get_api_id():
+            self._set_api_id(profile.api_id)
         self._client.use_proxy(self._profiles.load_proxy(profile) or "")
         self._client.use_session(session)
 
@@ -353,6 +385,11 @@ class AccountSessions:
         api_id = self._get_api_id()
         if api_id:
             self._credentials.delete_session(api_id)
+
+
+def _tag(profile: Profile) -> str:
+    """Метка профиля для лога — без номера телефона."""
+    return f"«…{profile.phone[-2:]}»"
 
 
 _CONNECT_FAILED = (

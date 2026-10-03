@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from typing import Optional
 
+from telethon.tl.types import MessageMediaWebPage
 from telethon.utils import get_display_name
 
 from ..models.message import (
@@ -202,6 +203,10 @@ def _extract_links(message) -> list[LinkItem]:
 
 
 def _detect_media_type(message) -> Optional[MediaType]:
+    # Превью ссылки Telethon отдаёт как message.photo / message.document, но
+    # это не вложение автора — иначе каждый пост со ссылкой считался бы «с фото».
+    if isinstance(getattr(message, "media", None), MessageMediaWebPage):
+        return None
     if getattr(message, "sticker", None):
         return MediaType.STICKER
     if getattr(message, "photo", None):

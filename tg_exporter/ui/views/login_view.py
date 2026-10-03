@@ -311,6 +311,18 @@ class LoginView(ctk.CTkFrame):
         if self._mode_var.get() != "По номеру":
             self._mode_var.set("По номеру")
             self._on_mode_change("По номеру")
+            return
+        # Режим уже «По номеру», но форма могла остаться на шаге ввода кода или
+        # в «Подключение...» с прошлого входа — возвращаем её к вводу номера.
+        # pack_forget напрямую: _hide_widget смотрит winfo_ismapped, а экран
+        # входа в этот момент ещё может быть не отрисован.
+        self._code_entry.pack_forget()
+        self._pwd_frame.pack_forget()
+        self._code_entry.clear()
+        self._pwd_entry.clear()
+        self._state = "phone"
+        self._action_btn.set_idle_text("Получить код")
+        self._action_btn.set_loading(False)
 
     def refresh_state(self) -> None:
         """Вызывается App после изменения config / credentials."""

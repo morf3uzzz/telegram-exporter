@@ -5,7 +5,9 @@ import os
 import tempfile
 import unittest
 
-from tg_exporter.models.message import ExportMessage, MediaType, ReactionItem, PollData, PollAnswer
+from tg_exporter.models.message import (
+    ExportMessage, LinkItem, MediaType, ReactionItem, PollData, PollAnswer,
+)
 from tg_exporter.models.config import MarkdownSettings
 
 
@@ -272,6 +274,15 @@ class TestMarkdownExporter(unittest.TestCase):
         content = self._read(self._run(self._album(caption_at=2))[0])
         self.assertEqual(content.count("1 — начало прогрева"), 1)
         self.assertIn("📎 Альбом — вложений: 3", content)
+
+    def test_album_keeps_links_of_every_item(self):
+        items = self._album(count=2)
+        import dataclasses
+        items[1] = dataclasses.replace(
+            items[1], links=(LinkItem(url="https://example.com/b", text="вторая"),),
+        )
+        content = self._read(self._run(items)[0])
+        self.assertIn("https://example.com/b", content)
 
     def test_two_albums_stay_separate(self):
         first = self._album(group=500, start=10, caption="1 — начало прогрева")

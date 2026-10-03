@@ -231,16 +231,18 @@ def _format_message(
     if media:
         extras.append(media)
 
-    if msg.links:
+    # Ссылки — со всех сообщений блока (в альбоме подписи бывают у нескольких).
+    links = list(dict.fromkeys(lnk for m in items for lnk in m.links))
+    if links:
         link_lines = []
-        for link in msg.links:
+        for link in links:
             if link.text and link.text != link.url:
                 link_lines.append(f"[{link.text}]({link.url})")
             else:
                 link_lines.append(link.url)
         if link_lines:
-            has_text_links = any(lnk.text for lnk in msg.links)
-            all_in_body = all(lnk.url in body for lnk in msg.links if not lnk.text)
+            has_text_links = any(lnk.text for lnk in links)
+            all_in_body = all(lnk.url in body for lnk in links if not lnk.text)
             if has_text_links or not all_in_body:
                 extras.append("🔗 " + " | ".join(link_lines))
 

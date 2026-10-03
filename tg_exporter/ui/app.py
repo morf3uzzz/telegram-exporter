@@ -119,6 +119,10 @@ class App(ctk.CTk):
         self._pending_proxy: str = ""
         # Активен ли цикл поллинга QR-входа (выключается при уходе с QR-режима).
         self._qr_active: bool = False
+        # Вход уже состоялся (ставит worker). Действия с экрана входа, попавшие
+        # в очередь, пока шёл автовход, после него выполняться не должны —
+        # иначе они увели бы только что восстановленный клиент на чистый ключ.
+        self._logged_in: bool = False
         self._folder_active: bool = False
         self._folder_mode: str = "По чатам"   # "По чатам" | "Один .md на чат" | "Один .md на папку"
         self._folder_transcribe: bool = False
@@ -218,6 +222,7 @@ class App(ctk.CTk):
     def show_login(self) -> None:
         # LOGIN-режим: прячем shell, показываем login на всё окно.
         self._qr_active = False
+        self._logged_in = False
         self._shell.pack_forget()
         self.login_view.pack(fill="both", expand=True)
         self._current_view = self.login_view
@@ -724,30 +729,35 @@ class App(ctk.CTk):
             self._worker.put_event("login_error", "Автовход не удался. Войдите заново.")
             return
         if res.ok:
-            self._worker.put_event("login_success", _RESTORED)
+            self._emit_login_success(_RESTORED)
         elif res.message:
             self._worker.put_event("login_error", res.message)
+
+    def _emit_login_success(self, payload=None) -> None:
+        self._logged_in = True
+        self._worker.put_event("login_success", payload)
 
     def _bg_send_code(self, phone: str) -> None:
         # Номер сохранённого аккаунта → входим по его сессии, без кода. Любой
         # другой — только на чистом auth-ключе (см. core/account_session.py).
+        if self._logged_in:
+            return
         try:
-            restored = self._accounts.begin_phone_login(phone)
+            restored = self._accounts.begin_phone_login(phone, self._pending_proxy)
         except Exception as exc:
             logger.error("begin_phone_login failed", exc=exc)
             self._worker.put_event("login_error", "Не удалось начать вход. Попробуйте ещё раз.")
             return
         if restored is not None:
-            if restored.ok:
-                self._worker.put_event("login_success", _RESTORED)
-            else:
-                self._worker.put_event("login_error", restored.message or "Ошибка")
+            # Прокси с экрана входа, если понадобился, уже записан в профиль.
+            self._pending_proxy = ""
+            self._emit_login_success(_RESTORED)
             return
         if self._pending_proxy:
             self._client_mgr.use_proxy(self._pending_proxy)
         result = self._auth.send_code(phone)
         if result.step == AuthStep.SUCCESS:
-            self._worker.put_event("login_success", None)
+            self._emit_login_success()
         elif result.step == AuthStep.CODE_SENT:
             self._worker.put_event("code_sent", None)
         else:
@@ -756,7 +766,7 @@ class App(ctk.CTk):
     def _bg_verify_code(self, code: str, password: str) -> None:
         result = self._auth.verify_code(code, password)
         if result.step == AuthStep.SUCCESS:
-            self._worker.put_event("login_success", None)
+            self._emit_login_success()
         elif result.step == AuthStep.PASSWORD_REQUIRED:
             self._worker.put_event("login_2fa", None)
         else:
@@ -764,6 +774,9 @@ class App(ctk.CTk):
 
     def _bg_qr_login(self) -> None:
         """Фоновый цикл QR-входа: показать QR → поллить до входа/2FA/истечения."""
+        if self._logged_in:
+            self._qr_active = False
+            return
         try:
             # Прокси для входа (как и для входа по номеру) — до создания профиля.
             self._client_mgr.use_proxy(self._pending_proxy)
@@ -804,7 +817,7 @@ class App(ctk.CTk):
                 return
             if result.step == AuthStep.SUCCESS:
                 self._qr_active = False
-                self._worker.put_event("login_success", None)
+                self._emit_login_success()
                 return
             if result.step == AuthStep.PASSWORD_REQUIRED:
                 self._qr_active = False
@@ -824,7 +837,7 @@ class App(ctk.CTk):
         """Пароль 2FA после QR-сканирования. Неверный пароль — даём повторить."""
         result = self._auth.verify_qr_password(password)
         if result.step == AuthStep.SUCCESS:
-            self._worker.put_event("login_success", None)
+            self._emit_login_success()
         elif result.step == AuthStep.PASSWORD_REQUIRED:
             # Неверный/пустой пароль — остаёмся в 2FA, разрешаем повторить.
             self._worker.put_event("qr_2fa_retry", "Неверный пароль 2FA. Попробуйте ещё раз.")

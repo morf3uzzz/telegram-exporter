@@ -82,6 +82,16 @@ class TelegramClientManager:
             self._session_override = FRESH_SESSION
             self._destroy_client()
 
+    def pin_session(self, session_string: str) -> None:
+        """
+        Запоминает сессию ЖИВОГО клиента, не пересоздавая его. Нужно после
+        входа по коду/QR: он идёт на чистой сессии (use_fresh_session), и без
+        этого любое пересоздание клиента (например, смена прокси) построило бы
+        новый пустой ключ — приложение оказалось бы разлогинено.
+        """
+        with self._lock:
+            self._session_override = session_string or None
+
     def use_proxy(self, proxy: Optional[str]) -> None:
         """
         Указывает прокси активного профиля (URL-строка) для клиента.
